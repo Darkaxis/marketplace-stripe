@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type Stripe from "stripe";
 import {
   isSupabaseConfigured,
   type Listing,
@@ -7,7 +8,11 @@ import {
 } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
 import { memoryStore } from "@/lib/memory-store";
-import { getStripe, isStripeConfigured } from "@/lib/stripe";
+import {
+  calculatePlatformFeeCents,
+  getStripe,
+  isStripeConfigured,
+} from "@/lib/stripe";
 
 const STATE_BUCKET = "stripe-connect-state";
 const SELLERS_FOLDER = "_stripe_sellers";
@@ -211,6 +216,31 @@ export async function saveSellerAccount(
 }
 
 /**
+ * Builds a normalized seller persistence payload from a Stripe Account snapshot.
+ */
+export function sellerInputFromStripeAccount(
+  email: string,
+  account: Pick<
+    Stripe.Account,
+    "id" | "charges_enabled" | "payouts_enabled" | "details_submitted"
+  >
+) {
+  const chargesEnabled = Boolean(account.charges_enabled);
+  const payoutsEnabled = Boolean(account.payouts_enabled);
+  const detailsSubmitted = Boolean(account.details_submitted);
+  const onboardingComplete = Boolean(chargesEnabled && detailsSubmitted);
+
+  return {
+    email,
+    stripe_account_id: account.id,
+    onboarding_complete: onboardingComplete,
+    charges_enabled: chargesEnabled,
+    payouts_enabled: payoutsEnabled,
+    details_submitted: detailsSubmitted,
+  };
+}
+
+/**
  * Syncs a seller's Stripe account status directly from the Stripe API,
  * updating Supabase when `details_submitted` or `charges_enabled` changes.
  */
@@ -224,25 +254,15 @@ export async function syncSellerWithStripe(
   try {
     const stripe = getStripe();
     const account = await stripe.accounts.retrieve(seller.stripe_account_id);
-    const chargesEnabled = Boolean(account.charges_enabled);
-    const payoutsEnabled = Boolean(account.payouts_enabled);
-    const detailsSubmitted = Boolean(account.details_submitted);
-    const onboardingComplete = Boolean(chargesEnabled && detailsSubmitted);
+    const next = sellerInputFromStripeAccount(seller.email, account);
 
     if (
-      onboardingComplete !== seller.onboarding_complete ||
-      chargesEnabled !== seller.charges_enabled ||
-      payoutsEnabled !== seller.payouts_enabled ||
-      detailsSubmitted !== seller.details_submitted
+      next.onboarding_complete !== seller.onboarding_complete ||
+      next.charges_enabled !== seller.charges_enabled ||
+      next.payouts_enabled !== seller.payouts_enabled ||
+      next.details_submitted !== seller.details_submitted
     ) {
-      return await saveSellerAccount({
-        email: seller.email,
-        stripe_account_id: seller.stripe_account_id,
-        onboarding_complete: onboardingComplete,
-        charges_enabled: chargesEnabled,
-        payouts_enabled: payoutsEnabled,
-        details_submitted: detailsSubmitted,
-      });
+      return await saveSellerAccount(next);
     }
 
     return seller;
@@ -643,6 +663,76 @@ export async function getOrderBySessionId(
 }
 
 /**
+ * Fetches a single listing by UUID from Supabase or the in-memory fallback store.
+ */
+export async function getListingById(
+  listingId: string
+): Promise<Listing | null> {
+  const cleanId = listingId.trim();
+  if (isSupabaseConfigured()) {
+    const db = getServerSupabaseClient();
+    const { data, error } = await db
+      .from("listings")
+      .select("*")
+      .eq("id", cleanId)
+      .single();
+    if (error || !data) {
+      return null;
+    }
+    return data as Listing;
+  }
+
+  return memoryStore.getListingById(cleanId);
+}
+
+/**
+ * Computes platform fee and seller payout from a paid Stripe Checkout Session
+ * and records the completed order idempotently.
+ */
+export async function recordOrderFromCheckoutSession(params: {
+  listing: Pick<Listing, "id" | "title" | "price" | "seller_email">;
+  session: Stripe.Checkout.Session;
+  sellerStripeAccountId: string;
+  totalCents?: number;
+}): Promise<OrderRecord> {
+  const { listing, session, sellerStripeAccountId } = params;
+  const expectedMinCents = Math.round(Number(listing.price) * 100);
+  const resolvedTotalCents =
+    params.totalCents ?? session.amount_total ?? expectedMinCents;
+
+  const metaFeeCents = Number(session.metadata?.platform_fee_cents);
+  const feeCents =
+    Number.isFinite(metaFeeCents) && metaFeeCents >= 0
+      ? metaFeeCents
+      : calculatePlatformFeeCents(resolvedTotalCents);
+
+  const amountTotal = Math.round(resolvedTotalCents) / 100;
+  const platformFee = Math.round(feeCents) / 100;
+  const sellerPayout = Math.round((amountTotal - platformFee) * 100) / 100;
+
+  const paymentIntentId =
+    typeof session.payment_intent === "string"
+      ? session.payment_intent
+      : session.payment_intent?.id || null;
+
+  return recordCompletedOrder({
+    listing_id: listing.id,
+    listing_title: listing.title,
+    seller_email: listing.seller_email,
+    seller_stripe_account_id: sellerStripeAccountId,
+    buyer_email:
+      session.customer_details?.email || session.customer_email || null,
+    amount_total: amountTotal,
+    platform_fee: platformFee,
+    seller_payout: sellerPayout,
+    currency: session.currency || "usd",
+    stripe_checkout_session_id: session.id,
+    stripe_payment_intent_id: paymentIntentId,
+    status: "paid",
+  });
+}
+
+/**
  * Reconciles any pending checkout session for a specific listing against Stripe,
  * ensuring that if a payment succeeded on Stripe, the listing is marked Sold even before redirect/webhook.
  */
@@ -692,28 +782,10 @@ export async function reconcilePendingCheckoutForListing(
           session.metadata?.listing_id === listing.id &&
           (session.amount_total ?? 0) >= expectedMinCents
         ) {
-          const amountTotal = (session.amount_total ?? 0) / 100;
-          const platformFee = session.metadata?.platform_fee_cents
-            ? Number(session.metadata.platform_fee_cents) / 100
-            : Math.round(amountTotal * 10) / 100;
-          const sellerPayout =
-            Math.round((amountTotal - platformFee) * 100) / 100;
-
-          const order = await recordCompletedOrder({
-            listing_id: listing.id,
-            listing_title: listing.title,
-            seller_email: listing.seller_email,
-            seller_stripe_account_id: stripeAccountId,
-            buyer_email: session.customer_details?.email || null,
-            amount_total: amountTotal,
-            platform_fee: platformFee,
-            seller_payout: sellerPayout,
-            currency: session.currency || "usd",
-            stripe_checkout_session_id: session.id,
-            stripe_payment_intent_id:
-              typeof session.payment_intent === "string"
-                ? session.payment_intent
-                : session.payment_intent?.id || null,
+          const order = await recordOrderFromCheckoutSession({
+            listing,
+            session,
+            sellerStripeAccountId: stripeAccountId,
           });
 
           await db.storage

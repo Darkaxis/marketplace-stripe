@@ -1,19 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import type Stripe from "stripe";
+import { getStripe, isStripeConfigured } from "@/lib/stripe";
 import {
-  calculatePlatformFeeCents,
-  getStripe,
-  isStripeConfigured,
-} from "@/lib/stripe";
-import {
+  getListingById,
   getSellerByEmail,
   getSellerByStripeAccountId,
-  recordCompletedOrder,
+  recordOrderFromCheckoutSession,
   saveSellerAccount,
+  sellerInputFromStripeAccount,
 } from "@/lib/stripe-db";
-import { isSupabaseConfigured } from "@/lib/supabase";
-import { getServerSupabaseClient } from "@/lib/supabase-admin";
-import { memoryStore } from "@/lib/memory-store";
 import { isValidUuid } from "@/lib/validation";
 
 export const runtime = "nodejs";
@@ -91,18 +86,7 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      let listing = null;
-      if (isSupabaseConfigured()) {
-        const db = getServerSupabaseClient();
-        const { data } = await db
-          .from("listings")
-          .select("*")
-          .eq("id", listingId)
-          .single();
-        listing = data || null;
-      } else {
-        listing = memoryStore.getListingById(listingId);
-      }
+      const listing = await getListingById(listingId);
 
       // If this listing does not exist in our Supabase database, it belongs to another candidate in the shared sandbox
       if (!listing) {
@@ -145,35 +129,11 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const metaFeeCents = Number(session.metadata?.platform_fee_cents);
-      const feeCents =
-        Number.isFinite(metaFeeCents) && metaFeeCents >= 0
-          ? metaFeeCents
-          : calculatePlatformFeeCents(totalCents);
-
-      const amountTotal = Math.round(totalCents) / 100;
-      const platformFee = Math.round(feeCents) / 100;
-      const sellerPayout = Math.round((amountTotal - platformFee) * 100) / 100;
-
-      const paymentIntentId =
-        typeof session.payment_intent === "string"
-          ? session.payment_intent
-          : session.payment_intent?.id || null;
-
-      const order = await recordCompletedOrder({
-        listing_id: listing.id,
-        listing_title: listing.title,
-        seller_email: listing.seller_email,
-        seller_stripe_account_id: seller.stripe_account_id,
-        buyer_email:
-          session.customer_details?.email || session.customer_email || null,
-        amount_total: amountTotal,
-        platform_fee: platformFee,
-        seller_payout: sellerPayout,
-        currency: session.currency || "usd",
-        stripe_checkout_session_id: session.id,
-        stripe_payment_intent_id: paymentIntentId,
-        status: "paid",
+      const order = await recordOrderFromCheckoutSession({
+        listing,
+        session,
+        sellerStripeAccountId: seller.stripe_account_id,
+        totalCents,
       });
 
       return NextResponse.json(
@@ -197,19 +157,9 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      const chargesEnabled = Boolean(account.charges_enabled);
-      const payoutsEnabled = Boolean(account.payouts_enabled);
-      const detailsSubmitted = Boolean(account.details_submitted);
-      const onboardingComplete = Boolean(chargesEnabled && detailsSubmitted);
-
-      await saveSellerAccount({
-        email: existingSeller.email,
-        stripe_account_id: accountId,
-        onboarding_complete: onboardingComplete,
-        charges_enabled: chargesEnabled,
-        payouts_enabled: payoutsEnabled,
-        details_submitted: detailsSubmitted,
-      });
+      await saveSellerAccount(
+        sellerInputFromStripeAccount(existingSeller.email, account)
+      );
 
       return NextResponse.json(
         { received: true, account_id: accountId },

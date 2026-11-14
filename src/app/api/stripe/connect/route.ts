@@ -4,23 +4,19 @@ import {
   enrichListingsWithStripeState,
   getSellerByEmail,
   saveSellerAccount,
+  sellerInputFromStripeAccount,
 } from "@/lib/stripe-db";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
 import { memoryStore } from "@/lib/memory-store";
 import { checkRateLimit } from "@/lib/rate-limit";
-import {
-  getSafeSiteOrigin,
-  isValidEmail,
-  isValidStripeAccountId,
-} from "@/lib/validation";
+import { getSafeSiteOrigin, isValidEmail } from "@/lib/validation";
 
 // GET /api/stripe/connect?email=... - Check a seller's Stripe Connect onboarding status & their listings
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const rawEmail = searchParams.get("email")?.trim() || "";
-    const rawAccountId = searchParams.get("account_id")?.trim() || "";
 
     if (!rawEmail) {
       return NextResponse.json({
@@ -37,44 +33,10 @@ export async function GET(request: NextRequest) {
 
     const cleanEmail = rawEmail.toLowerCase();
 
-    // Only look up / refresh the account already bound to this email in Supabase.
-    // Never accept an arbitrary `account_id` from query params when no seller exists in DB.
-    let seller = await getSellerByEmail(cleanEmail, {
+    // Look up & refresh the account bound to this email in Supabase
+    const seller = await getSellerByEmail(cleanEmail, {
       refreshFromStripe: true,
     });
-
-    if (
-      seller &&
-      rawAccountId &&
-      isValidStripeAccountId(rawAccountId) &&
-      seller.stripe_account_id === rawAccountId &&
-      isStripeConfigured()
-    ) {
-      try {
-        const stripe = getStripe();
-        const account = await stripe.accounts.retrieve(seller.stripe_account_id);
-        const metaEmail = account.metadata?.seller_email?.trim().toLowerCase();
-        if (!metaEmail || metaEmail === cleanEmail) {
-          const chargesEnabled = Boolean(account.charges_enabled);
-          const payoutsEnabled = Boolean(account.payouts_enabled);
-          const detailsSubmitted = Boolean(account.details_submitted);
-          const onboardingComplete = Boolean(
-            chargesEnabled && detailsSubmitted
-          );
-
-          seller = await saveSellerAccount({
-            email: cleanEmail,
-            stripe_account_id: account.id,
-            onboarding_complete: onboardingComplete,
-            charges_enabled: chargesEnabled,
-            payouts_enabled: payoutsEnabled,
-            details_submitted: detailsSubmitted,
-          });
-        }
-      } catch (err) {
-        console.error("Error retrieving Stripe account on return:", err);
-      }
-    }
 
     // Fetch listings belonging to this seller email
     let sellerListings = [];
@@ -148,6 +110,7 @@ export async function POST(request: NextRequest) {
       refreshFromStripe: true,
     });
     let stripeAccountId = existingSeller?.stripe_account_id || "";
+    let isNoDashboardAccount = false;
 
     // Prevent unauthenticated re-onboarding / bank detail modification once onboarding is complete
     if (
@@ -166,34 +129,62 @@ export async function POST(request: NextRequest) {
       try {
         const account = await stripe.accounts.retrieve(stripeAccountId);
         if (account.charges_enabled && account.details_submitted) {
-          existingSeller = await saveSellerAccount({
-            email: cleanEmail,
-            stripe_account_id: account.id,
-            onboarding_complete: true,
-            charges_enabled: true,
-            payouts_enabled: Boolean(account.payouts_enabled),
-            details_submitted: true,
-          });
+          existingSeller = await saveSellerAccount(
+            sellerInputFromStripeAccount(cleanEmail, account)
+          );
           return NextResponse.json({
             alreadyOnboarded: true,
             stripe_account_id: existingSeller.stripe_account_id,
             seller: existingSeller,
           });
         }
+
+        const dashboardType = account.controller?.stripe_dashboard?.type;
+        if (!account.details_submitted && dashboardType !== "none") {
+          // Replace unfinished legacy Standard account (which prompts for a Stripe password)
+          // with a passwordless Accounts v2 (`dashboard: "none"`) account.
+          stripeAccountId = "";
+        } else {
+          isNoDashboardAccount = dashboardType === "none";
+        }
       } catch {
         stripeAccountId = "";
       }
     }
 
-    // Create a new Stripe Connect Standard account (US) for Direct Charges
+    // Create a new Stripe Connect Accounts v2 account (US, dashboard: "none")
+    // so test sellers are not prompted to create a Stripe account password
     if (!stripeAccountId) {
-      const account = await stripe.accounts.create({
-        type: "standard",
-        country: "US",
-        email: cleanEmail,
-        business_type: "individual",
-        business_profile: {
-          product_description: "Marketplace seller items",
+      const account = await stripe.v2.core.accounts.create({
+        contact_email: cleanEmail,
+        display_name: cleanEmail,
+        dashboard: "none",
+        identity: {
+          country: "us",
+          entity_type: "individual",
+        },
+        defaults: {
+          responsibilities: {
+            fees_collector: "application",
+            losses_collector: "stripe",
+          },
+          profile: {
+            product_description: "Marketplace seller items",
+          },
+        },
+        configuration: {
+          merchant: {
+            capabilities: {
+              card_payments: { requested: true },
+            },
+          },
+          recipient: {
+            capabilities: {
+              stripe_balance: {
+                stripe_transfers: { requested: true },
+              },
+            },
+          },
         },
         metadata: {
           seller_email: cleanEmail,
@@ -202,16 +193,15 @@ export async function POST(request: NextRequest) {
       });
 
       stripeAccountId = account.id;
+      isNoDashboardAccount = true;
 
       existingSeller = await saveSellerAccount({
         email: cleanEmail,
         stripe_account_id: stripeAccountId,
-        onboarding_complete: Boolean(
-          account.charges_enabled && account.details_submitted
-        ),
-        charges_enabled: Boolean(account.charges_enabled),
-        payouts_enabled: Boolean(account.payouts_enabled),
-        details_submitted: Boolean(account.details_submitted),
+        onboarding_complete: false,
+        charges_enabled: false,
+        payouts_enabled: false,
+        details_submitted: false,
       });
     }
 
@@ -223,15 +213,30 @@ export async function POST(request: NextRequest) {
       cleanEmail
     )}&account_id=${encodeURIComponent(stripeAccountId)}&refresh=1`;
 
-    const accountLink = await stripe.accountLinks.create({
-      account: stripeAccountId,
-      refresh_url: refreshUrl,
-      return_url: returnUrl,
-      type: "account_onboarding",
-    });
+    const accountLinkUrl = isNoDashboardAccount
+      ? (
+          await stripe.v2.core.accountLinks.create({
+            account: stripeAccountId,
+            use_case: {
+              type: "account_onboarding",
+              account_onboarding: {
+                refresh_url: refreshUrl,
+                return_url: returnUrl,
+              },
+            },
+          })
+        ).url
+      : (
+          await stripe.accountLinks.create({
+            account: stripeAccountId,
+            refresh_url: refreshUrl,
+            return_url: returnUrl,
+            type: "account_onboarding",
+          })
+        ).url;
 
     return NextResponse.json({
-      url: accountLink.url,
+      url: accountLinkUrl,
       stripe_account_id: stripeAccountId,
       seller: existingSeller,
     });

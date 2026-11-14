@@ -4,10 +4,7 @@ import React, { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
-  ArrowLeft,
   CheckCircle2,
-  CreditCard,
-  ExternalLink,
   ImageIcon,
   Loader2,
   PackageCheck,

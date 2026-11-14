@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isSupabaseConfigured } from "@/lib/supabase";
-import { getServerSupabaseClient } from "@/lib/supabase-admin";
-import { memoryStore } from "@/lib/memory-store";
 import {
   enrichListingsWithStripeState,
+  getListingById,
   reconcilePendingCheckoutForListing,
 } from "@/lib/stripe-db";
 import { isValidUuid } from "@/lib/validation";
@@ -30,56 +28,32 @@ export async function GET(
       );
     }
 
-    if (isSupabaseConfigured()) {
-      const db = getServerSupabaseClient();
-      const { data, error } = await db
-        .from("listings")
-        .select("*")
-        .eq("id", id.trim())
-        .single();
-
-      if (error || !data) {
-        return NextResponse.json(
-          { error: "Listing not found" },
-          { status: 404 }
-        );
-      }
-
-      let [enriched] = await enrichListingsWithStripeState([data], {
-        syncUnfinishedSellersWithStripe: true,
-      });
-
-      if (!enriched.sold) {
-        const reconciledOrder = await reconcilePendingCheckoutForListing(
-          enriched
-        );
-        if (reconciledOrder) {
-          enriched = {
-            ...enriched,
-            status: "sold",
-            sold: true,
-          };
-        }
-      }
-
-      return NextResponse.json({ listing: toPublicDetailListing(enriched) });
-    }
-
-    const listing = memoryStore.getListingById(id);
-    if (!listing) {
+    const rawListing = await getListingById(id);
+    if (!rawListing) {
       return NextResponse.json(
         { error: "Listing not found" },
         { status: 404 }
       );
     }
 
-    const [enrichedFallback] = await enrichListingsWithStripeState([listing], {
+    let [enriched] = await enrichListingsWithStripeState([rawListing], {
       syncUnfinishedSellersWithStripe: true,
     });
 
-    return NextResponse.json({
-      listing: toPublicDetailListing(enrichedFallback),
-    });
+    if (!enriched.sold) {
+      const reconciledOrder = await reconcilePendingCheckoutForListing(
+        enriched
+      );
+      if (reconciledOrder) {
+        enriched = {
+          ...enriched,
+          status: "sold",
+          sold: true,
+        };
+      }
+    }
+
+    return NextResponse.json({ listing: toPublicDetailListing(enriched) });
   } catch (err) {
     console.error("Unexpected error in GET /api/listings/[id]:", err);
     return NextResponse.json(

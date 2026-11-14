@@ -1,18 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import {
-  calculatePlatformFeeCents,
-  getStripe,
-  isStripeConfigured,
-} from "@/lib/stripe";
+import { getStripe, isStripeConfigured } from "@/lib/stripe";
 import {
   enrichListingsWithStripeState,
+  getListingById,
   getOrderBySessionId,
   getSellerByEmail,
-  recordCompletedOrder,
+  recordOrderFromCheckoutSession,
 } from "@/lib/stripe-db";
-import { isSupabaseConfigured } from "@/lib/supabase";
-import { getServerSupabaseClient } from "@/lib/supabase-admin";
-import { memoryStore } from "@/lib/memory-store";
 import {
   isValidStripeAccountId,
   isValidStripeSessionId,
@@ -38,21 +32,9 @@ export async function GET(request: NextRequest) {
     let order = await getOrderBySessionId(sessionId);
 
     const targetListingId = order?.listing_id || rawListingId;
-    let rawListing = null;
-
-    if (isValidUuid(targetListingId)) {
-      if (isSupabaseConfigured()) {
-        const db = getServerSupabaseClient();
-        const { data } = await db
-          .from("listings")
-          .select("*")
-          .eq("id", targetListingId)
-          .single();
-        rawListing = data || null;
-      } else {
-        rawListing = memoryStore.getListingById(targetListingId);
-      }
-    }
+    let rawListing = isValidUuid(targetListingId)
+      ? await getListingById(targetListingId)
+      : null;
 
     let enrichedListing = null;
     if (rawListing) {
@@ -87,17 +69,7 @@ export async function GET(request: NextRequest) {
         const metaListingId = session.metadata?.listing_id?.trim() || "";
 
         if (!rawListing && isValidUuid(metaListingId)) {
-          if (isSupabaseConfigured()) {
-            const db = getServerSupabaseClient();
-            const { data } = await db
-              .from("listings")
-              .select("*")
-              .eq("id", metaListingId)
-              .single();
-            rawListing = data || null;
-          } else {
-            rawListing = memoryStore.getListingById(metaListingId);
-          }
+          rawListing = await getListingById(metaListingId);
         }
 
         if (rawListing) {
@@ -117,43 +89,14 @@ export async function GET(request: NextRequest) {
             listingMatches &&
             (session.amount_total ?? 0) >= expectedMinCents
           ) {
-            const totalCents = session.amount_total ?? expectedMinCents;
-            const metaFeeCents = Number(session.metadata?.platform_fee_cents);
-            const feeCents =
-              Number.isFinite(metaFeeCents) && metaFeeCents >= 0
-                ? metaFeeCents
-                : calculatePlatformFeeCents(totalCents);
-
-            const amountTotal = Math.round(totalCents) / 100;
-            const platformFee = Math.round(feeCents) / 100;
-            const sellerPayout =
-              Math.round((amountTotal - platformFee) * 100) / 100;
-
-            const paymentIntentId =
-              typeof session.payment_intent === "string"
-                ? session.payment_intent
-                : session.payment_intent?.id || null;
-
-            order = await recordCompletedOrder({
-              listing_id: rawListing.id,
-              listing_title: rawListing.title,
-              seller_email: rawListing.seller_email,
-              seller_stripe_account_id:
+            order = await recordOrderFromCheckoutSession({
+              listing: rawListing,
+              session,
+              sellerStripeAccountId:
                 expectedSellerAcct ||
                 stripeAccountId ||
                 session.metadata?.seller_stripe_account_id ||
                 "",
-              buyer_email:
-                session.customer_details?.email ||
-                session.customer_email ||
-                null,
-              amount_total: amountTotal,
-              platform_fee: platformFee,
-              seller_payout: sellerPayout,
-              currency: session.currency || "usd",
-              stripe_checkout_session_id: session.id,
-              stripe_payment_intent_id: paymentIntentId,
-              status: "paid",
             });
           }
         }

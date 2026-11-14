@@ -8,8 +8,8 @@ This guide covers configuring **Supabase**, **Stripe Connect**, and deploying to
 
 1. Open your Supabase project's **SQL Editor** → **New Query**.
 2. Paste the contents of [`schema.sql`](./schema.sql) and click **Run**.
-   - `schema.sql` is idempotent (`IF NOT EXISTS`), so it safely upgrades an existing Test 3 database or initializes a fresh database with `listings`, `sellers`, `orders`, `messages`, and the `listing-images` storage bucket.
-   - Even before running the SQL migration, the backend also mirrors seller and order state in Supabase `storage.objects` (`listing-images` bucket) so onboarding and checkout work seamlessly out of the box.
+   - `schema.sql` is idempotent (`IF NOT EXISTS`), so it safely upgrades an existing Test 3 database or initializes a fresh database with `listings`, `sellers`, `orders`, `messages`, the `listing-images` bucket, and the private `stripe-connect-state` storage bucket.
+   - Even before running the SQL migration, the backend also mirrors seller and order state in a private Supabase Storage bucket (`stripe-connect-state`) so onboarding and checkout work seamlessly out of the box.
 
 ---
 

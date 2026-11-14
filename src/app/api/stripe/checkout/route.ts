@@ -6,12 +6,10 @@ import {
 } from "@/lib/stripe";
 import {
   enrichListingsWithStripeState,
+  getListingById,
   reconcilePendingCheckoutForListing,
   recordPendingCheckoutSession,
 } from "@/lib/stripe-db";
-import { isSupabaseConfigured } from "@/lib/supabase";
-import { getServerSupabaseClient } from "@/lib/supabase-admin";
-import { memoryStore } from "@/lib/memory-store";
 import { checkRateLimit } from "@/lib/rate-limit";
 import {
   getSafeSiteOrigin,
@@ -53,20 +51,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const cleanId = listing_id.trim();
-    let rawListing = null;
-
-    if (isSupabaseConfigured()) {
-      const db = getServerSupabaseClient();
-      const { data } = await db
-        .from("listings")
-        .select("*")
-        .eq("id", cleanId)
-        .single();
-      rawListing = data || null;
-    } else {
-      rawListing = memoryStore.getListingById(cleanId);
-    }
+    const rawListing = await getListingById(listing_id);
 
     if (!rawListing) {
       return NextResponse.json(
