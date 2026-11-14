@@ -287,6 +287,7 @@ export function ItemGrid({
 
 function ListingCard({ item }: { item: Listing }) {
   const [imgError, setImgError] = useState(false);
+  const isSold = Boolean(item.sold || item.status === "sold");
 
   return (
     <Link href={`/item/${item.id}`} className="group block focus:outline-none">
@@ -299,7 +300,10 @@ function ListingCard({ item }: { item: Listing }) {
               src={item.image_url!}
               alt={item.title}
               onError={() => setImgError(true)}
-              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+              className={cn(
+                "h-full w-full object-cover transition-transform duration-300 group-hover:scale-105",
+                isSold && "opacity-75 grayscale-[25%]"
+              )}
             />
           ) : (
             <div className="flex h-full w-full flex-col items-center justify-center bg-gradient-to-br from-gray-100 to-gray-200 text-gray-400">
@@ -317,12 +321,37 @@ function ListingCard({ item }: { item: Listing }) {
               {getCategoryLabel(item.category)}
             </Badge>
           </div>
+
+          {/* Sold or Buy Now Status Overlay */}
+          <div className="absolute right-2.5 top-2.5">
+            {isSold ? (
+              <Badge className="bg-red-600 px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wider text-white shadow-xs hover:bg-red-700">
+                Sold
+              </Badge>
+            ) : item.seller_onboarded ? (
+              <Badge className="bg-[#635BFF] px-2.5 py-0.5 text-[11px] font-semibold text-white shadow-xs hover:bg-[#5249e0]">
+                Buy Now
+              </Badge>
+            ) : null}
+          </div>
         </div>
 
         {/* Item Info */}
         <CardContent className="p-3">
-          <div className="text-[17px] font-bold leading-snug text-[#050505]">
-            {formatPrice(item.price)}
+          <div className="flex items-center justify-between gap-2">
+            <div
+              className={cn(
+                "text-[17px] font-bold leading-snug text-[#050505]",
+                isSold && "line-through text-gray-400"
+              )}
+            >
+              {formatPrice(item.price)}
+            </div>
+            {isSold && (
+              <span className="text-xs font-extrabold uppercase tracking-wide text-red-600">
+                Sold
+              </span>
+            )}
           </div>
           <h3 className="mt-0.5 line-clamp-2 text-[15px] font-normal leading-snug text-[#050505] group-hover:text-[#1877F2]">
             {item.title}

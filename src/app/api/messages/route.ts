@@ -9,35 +9,11 @@ import { memoryStore } from "@/lib/memory-store";
 import { sendSellerNotificationEmail } from "@/lib/email";
 import { checkRateLimit } from "@/lib/rate-limit";
 import {
+  getSafeSiteOrigin,
   isValidEmail,
   isValidUuid,
   maskEmail,
 } from "@/lib/validation";
-
-function getSafeSiteOrigin(request: NextRequest): string {
-  const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim();
-  if (configured) {
-    try {
-      const parsed = new URL(configured);
-      if (parsed.protocol === "https:" || parsed.protocol === "http:") {
-        return parsed.origin;
-      }
-    } catch {
-      // Fall through to request origin check
-    }
-  }
-
-  const origin = request.nextUrl.origin;
-  try {
-    const parsed = new URL(origin);
-    if (parsed.protocol === "https:" || parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
-      return parsed.origin;
-    }
-  } catch {
-    // ignore
-  }
-  return "";
-}
 
 // GET /api/messages - Get anonymized inquiry activity for a listing (no raw buyer/seller PII exposed)
 export async function GET(request: NextRequest) {

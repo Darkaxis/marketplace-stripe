@@ -33,6 +33,38 @@ export interface Listing {
   location: string;
   created_at: string;
   updated_at: string;
+  status?: "available" | "sold";
+  sold?: boolean;
+  seller_stripe_account_id?: string | null;
+  seller_onboarded?: boolean;
+}
+
+export interface SellerAccount {
+  email: string;
+  stripe_account_id: string;
+  onboarding_complete: boolean;
+  charges_enabled: boolean;
+  payouts_enabled: boolean;
+  details_submitted: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrderRecord {
+  id: string;
+  listing_id: string;
+  listing_title: string;
+  seller_email: string;
+  seller_stripe_account_id: string;
+  buyer_email: string | null;
+  amount_total: number;
+  platform_fee: number;
+  seller_payout: number;
+  currency: string;
+  stripe_checkout_session_id: string;
+  stripe_payment_intent_id: string | null;
+  status: "paid" | "completed";
+  created_at: string;
 }
 
 export interface Message {

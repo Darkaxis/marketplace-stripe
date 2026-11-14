@@ -246,3 +246,53 @@ export function detectImageFormatFromBytes(
 
   return null;
 }
+
+export function isValidStripeSessionId(value: unknown): value is string {
+  return (
+    typeof value === "string" && /^cs_(test|live)_[A-Za-z0-9]+$/.test(value.trim())
+  );
+}
+
+export function isValidStripeAccountId(value: unknown): value is string {
+  return typeof value === "string" && /^acct_[A-Za-z0-9]+$/.test(value.trim());
+}
+
+/**
+ * Resolves a safe canonical site origin for outbound links and Stripe redirect URLs.
+ * Never trusts spoofable proxy headers like `x-forwarded-host` or arbitrary schemes.
+ */
+export function getSafeSiteOrigin(request: {
+  nextUrl: { origin: string };
+}): string {
+  const configured = process.env.NEXT_PUBLIC_SITE_URL?.trim();
+  if (configured) {
+    try {
+      const parsed = new URL(configured);
+      if (
+        parsed.protocol === "https:" ||
+        (parsed.protocol === "http:" &&
+          (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1"))
+      ) {
+        return parsed.origin;
+      }
+    } catch {
+      // Fall through to request origin check
+    }
+  }
+
+  const origin = request.nextUrl.origin;
+  try {
+    const parsed = new URL(origin);
+    if (
+      parsed.protocol === "https:" ||
+      (parsed.protocol === "http:" &&
+        (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1"))
+    ) {
+      return parsed.origin;
+    }
+  } catch {
+    // ignore
+  }
+
+  return "http://localhost:3000";
+}

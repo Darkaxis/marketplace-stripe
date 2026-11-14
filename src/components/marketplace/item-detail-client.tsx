@@ -18,6 +18,9 @@ import {
   Loader2,
   ImageIcon,
   ShieldCheck,
+  CreditCard,
+  ShoppingBag,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -66,6 +69,8 @@ export function ItemDetailClient({ id }: { id: string }) {
   // Action buttons state
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [buyingNow, setBuyingNow] = useState(false);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
 
   const fetchItemAndMessages = useCallback(async () => {
     try {
@@ -160,6 +165,36 @@ export function ItemDetailClient({ id }: { id: string }) {
     }
   };
 
+  const handleBuyNow = async () => {
+    if (!listing) return;
+    setCheckoutError(null);
+    try {
+      setBuyingNow(true);
+      const res = await fetch("/api/stripe/checkout", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          listing_id: listing.id,
+          buyer_email: buyerEmail.trim() || undefined,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.url) {
+        throw new Error(data.error || "Could not start Stripe Checkout");
+      }
+
+      window.location.href = data.url;
+    } catch (err) {
+      setCheckoutError(
+        err instanceof Error
+          ? err.message
+          : "Failed to redirect to Stripe Checkout"
+      );
+      setBuyingNow(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex flex-1 items-center justify-center p-12">
@@ -249,6 +284,18 @@ export function ItemDetailClient({ id }: { id: string }) {
                   {getCategoryLabel(listing.category)}
                 </Badge>
               </Link>
+              {(listing.sold || listing.status === "sold") && (
+                <Badge className="bg-red-600 text-white hover:bg-red-700">
+                  Sold
+                </Badge>
+              )}
+              {!(listing.sold || listing.status === "sold") &&
+                listing.seller_onboarded && (
+                  <Badge className="bg-emerald-600 text-white hover:bg-emerald-700">
+                    <CreditCard className="mr-1 h-3 w-3" />
+                    Stripe Checkout Ready
+                  </Badge>
+                )}
               <span className="inline-flex items-center gap-1 text-xs text-gray-500">
                 <Clock className="h-3.5 w-3.5" />
                 Listed {formatRelativeTime(listing.created_at)}
@@ -259,13 +306,97 @@ export function ItemDetailClient({ id }: { id: string }) {
               {listing.title}
             </h1>
 
-            <div className="mt-1.5 text-2xl font-extrabold text-[#1877F2]">
-              {formatPrice(listing.price)}
+            <div className="mt-1.5 flex items-center gap-3">
+              <span
+                className={`text-2xl font-extrabold ${
+                  listing.sold || listing.status === "sold"
+                    ? "line-through text-gray-400"
+                    : "text-[#1877F2]"
+                }`}
+              >
+                {formatPrice(listing.price)}
+              </span>
+              {(listing.sold || listing.status === "sold") && (
+                <span className="rounded-md bg-red-100 px-2.5 py-0.5 text-sm font-extrabold uppercase tracking-wider text-red-700">
+                  Sold
+                </span>
+              )}
             </div>
 
             <div className="mt-2 flex items-center gap-1.5 text-sm text-gray-600">
               <MapPin className="h-4 w-4 shrink-0 text-[#1877F2]" />
               <span>Listed in {listing.location || "Palo Alto, CA"}</span>
+            </div>
+
+            {/* Buy Now / Sold / Unonboarded Seller Section */}
+            <div className="mt-4 space-y-2.5">
+              {checkoutError && (
+                <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-2.5 text-xs text-red-700">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
+                  <span>{checkoutError}</span>
+                </div>
+              )}
+
+              {listing.sold || listing.status === "sold" ? (
+                <div className="rounded-xl border border-red-200 bg-red-50/80 p-3.5">
+                  <Button
+                    type="button"
+                    disabled
+                    className="h-11 w-full bg-red-600 text-base font-bold text-white opacity-90"
+                  >
+                    <CheckCircle2 className="mr-2 h-5 w-5" />
+                    Sold
+                  </Button>
+                  <p className="mt-2 text-center text-xs font-medium text-red-800">
+                    This item has been purchased and is no longer available.
+                  </p>
+                </div>
+              ) : listing.seller_onboarded ? (
+                <div className="rounded-xl border border-[#635BFF]/25 bg-[#635BFF]/5 p-3.5">
+                  <Button
+                    type="button"
+                    onClick={handleBuyNow}
+                    disabled={buyingNow}
+                    className="h-12 w-full bg-[#635BFF] text-base font-bold text-white shadow-xs hover:bg-[#5249e0]"
+                  >
+                    {buyingNow ? (
+                      <>
+                        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                        Opening Stripe Checkout...
+                      </>
+                    ) : (
+                      <>
+                        <ShoppingBag className="mr-2 h-5 w-5" />
+                        Buy Now · {formatPrice(listing.price)}
+                      </>
+                    )}
+                  </Button>
+                  <p className="mt-2 text-center text-[11px] text-gray-600">
+                    Secure checkout via Stripe Connect · Seller receives{" "}
+                    <strong className="font-semibold text-[#050505]">
+                      {formatPrice(Math.round(Number(listing.price) * 90) / 100)}
+                    </strong>{" "}
+                    (10% platform fee)
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900">
+                  <p className="font-medium">
+                    Online purchase is not enabled for this item because the
+                    seller hasn&apos;t connected Stripe payouts yet.
+                  </p>
+                  <Link
+                    href={`/connect?email=${encodeURIComponent(
+                      listing.seller_email
+                    )}`}
+                    className="mt-1.5 inline-flex items-center gap-1 font-bold text-[#635BFF] hover:underline"
+                  >
+                    <CreditCard className="h-3.5 w-3.5" />
+                    Are you {listing.seller_email}? Connect with Stripe
+                    <ExternalLink className="h-3 w-3" />
+                  </Link>
+                </div>
+              )}
             </div>
 
             {/* Action Buttons Row */}
@@ -345,10 +476,22 @@ export function ItemDetailClient({ id }: { id: string }) {
               <h2 className="text-base font-bold text-[#050505]">
                 Seller Information
               </h2>
-              <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600">
-                <ShieldCheck className="h-3.5 w-3.5" />
-                Verified Email
-              </span>
+              {listing.seller_onboarded ? (
+                <span className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-600">
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                  Stripe Connected
+                </span>
+              ) : (
+                <Link
+                  href={`/connect?email=${encodeURIComponent(
+                    listing.seller_email
+                  )}`}
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-[#635BFF] hover:underline"
+                >
+                  <CreditCard className="h-3.5 w-3.5" />
+                  Connect with Stripe
+                </Link>
+              )}
             </div>
 
             <div className="flex items-center gap-3 rounded-xl border border-gray-200 p-3.5">

@@ -1,62 +1,46 @@
-# 🛠️ Setup & Deployment Guide
+# 🛠️ Setup & Deployment Guide (Supabase + Stripe Connect + Vercel)
 
-This guide covers connecting your **Supabase** backend and deploying to **Vercel**.
+This guide covers configuring **Supabase**, **Stripe Connect**, and deploying to **Vercel**.
 
 ---
 
 ## 1. Supabase Setup
 
-1. **Create a Supabase Project**
-   - Go to [supabase.com](https://supabase.com) and create a new project.
-
-2. **Run the Database Schema**
-   - In the Supabase Dashboard, navigate to **SQL Editor** → **New Query**.
-   - Paste the entire contents of [`schema.sql`](./schema.sql) and click **Run**.
-   - This creates:
-     - `listings` table
-     - `messages` table
-     - `listing-images` public storage bucket
-     - Row Level Security (RLS) policies and performance indexes
-
-3. **Copy Your API Credentials**
-   - Go to **Project Settings** → **API**.
-   - Copy the **Project URL** (`NEXT_PUBLIC_SUPABASE_URL`) and **anon public** key (`NEXT_PUBLIC_SUPABASE_ANON_KEY`).
-
-4. **Configure Local Environment**
-   - Create `.env.local` in the project root:
-     ```env
-     NEXT_PUBLIC_SUPABASE_URL=https://your-project-id.supabase.co
-     NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
-     # Optional: Enable instant email notifications to sellers via Resend
-     RESEND_API_KEY=re_your_api_key_here
-     EMAIL_FROM=Marketplace <onboarding@resend.dev>
-     ```
-
-5. **Populate Initial Sample Data (Optional)**
-   - Once your app is running and connected to Supabase, if your `listings` table is empty, simply click the **"Load Sample Listings"** button on the homepage empty state to insert 10 sample listings directly into your Supabase database.
+1. Open your Supabase project's **SQL Editor** → **New Query**.
+2. Paste the contents of [`schema.sql`](./schema.sql) and click **Run**.
+   - `schema.sql` is idempotent (`IF NOT EXISTS`), so it safely upgrades an existing Test 3 database or initializes a fresh database with `listings`, `sellers`, `orders`, `messages`, and the `listing-images` storage bucket.
+   - Even before running the SQL migration, the backend also mirrors seller and order state in Supabase `storage.objects` (`listing-images` bucket) so onboarding and checkout work seamlessly out of the box.
 
 ---
 
-## 2. Vercel Deployment
+## 2. Environment Variables (`.env.local` & Vercel)
 
-1. **Push to GitHub / Git Provider**
+Configure the following environment variables in `.env.local` locally and in your **Vercel Project Settings → Environment Variables**:
+
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project-id.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key-here
+
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=pk_test_...
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+```
+
+---
+
+## 3. Deploy to Vercel & Register Stripe Connect Webhook
+
+1. **Push to GitHub & Deploy on Vercel**:
    ```bash
    git add .
-   git commit -m "feat: complete Marketplace application"
+   git commit -m "feat: add Stripe Connect onboarding, checkout, and webhooks"
    git push origin main
    ```
-
-2. **Import Project in Vercel**
-   - Go to [vercel.com/new](https://vercel.com/new) and import your repository.
-   - Framework Preset: **Next.js** (auto-detected).
-
-3. **Add Environment Variables in Vercel**
-   - Add the following in the Vercel project settings:
-     - `NEXT_PUBLIC_SUPABASE_URL`
-     - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-     - `RESEND_API_KEY` (optional, for instant seller emails)
-     - `EMAIL_FROM` (optional, defaults to `Marketplace <onboarding@resend.dev>`)
-     - `NEXT_PUBLIC_SITE_URL` (optional, canonical Vercel URL for links in notification emails)
-
-4. **Deploy**
-   - Click **Deploy**. Next.js 15 will build and deploy your application.
+2. **Register Your Production Webhook Endpoint**:
+   Once deployed on Vercel, run [`scripts/create-webhook.mjs`](./scripts/create-webhook.mjs) with your public production Vercel URL:
+   ```bash
+   node --env-file=.env.local scripts/create-webhook.mjs https://YOUR-APP.vercel.app
+   ```
+3. **Save the Signing Secret (`STRIPE_WEBHOOK_SECRET`)**:
+   Copy the printed `whsec_...` value into `.env.local` and into Vercel Environment Variables as `STRIPE_WEBHOOK_SECRET`, then redeploy on Vercel.

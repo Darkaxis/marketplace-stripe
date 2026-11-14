@@ -11,6 +11,7 @@ import {
   Menu,
   X,
   Tag,
+  CreditCard,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -115,10 +116,37 @@ export function Header() {
               <span className="absolute bottom-0 left-0 right-0 h-[3px] rounded-t-full bg-[#1877F2]" />
             )}
           </Link>
+
+          <Link
+            href="/connect"
+            className={cn(
+              "relative flex h-full w-28 items-center justify-center rounded-lg transition-colors hover:bg-[#F0F2F5]",
+              pathname?.startsWith("/connect")
+                ? "text-[#635BFF] hover:bg-transparent"
+                : "text-gray-500"
+            )}
+            title="Connect with Stripe"
+          >
+            <CreditCard className="h-6 w-6" />
+            {pathname?.startsWith("/connect") && (
+              <span className="absolute bottom-0 left-0 right-0 h-[3px] rounded-t-full bg-[#635BFF]" />
+            )}
+          </Link>
         </nav>
 
         {/* Right: Actions */}
         <div className="flex items-center gap-2">
+          <Button
+            asChild
+            size="sm"
+            className="rounded-full bg-[#635BFF] px-3.5 font-semibold text-white shadow-none hover:bg-[#5249e0]"
+          >
+            <Link href="/connect">
+              <CreditCard className="h-4 w-4" />
+              <span>Connect with Stripe</span>
+            </Link>
+          </Button>
+
           <Button
             asChild
             size="sm"
@@ -160,7 +188,7 @@ export function Header() {
             />
           </form>
 
-          <div className="mb-4 grid grid-cols-2 gap-2">
+          <div className="mb-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
             <Button
               asChild
               variant="secondary"
@@ -180,6 +208,16 @@ export function Header() {
               <Link href="/create/item">
                 <Plus className="mr-2 h-4 w-4" />
                 Create Listing
+              </Link>
+            </Button>
+            <Button
+              asChild
+              className="justify-start bg-[#635BFF] font-semibold text-white hover:bg-[#5249e0]"
+              onClick={() => setMobileMenuOpen(false)}
+            >
+              <Link href="/connect">
+                <CreditCard className="mr-2 h-4 w-4" />
+                Connect with Stripe
               </Link>
             </Button>
           </div>

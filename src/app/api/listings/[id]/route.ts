@@ -2,9 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { isSupabaseConfigured, SAMPLE_LISTINGS } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
 import { memoryStore } from "@/lib/memory-store";
+import {
+  enrichListingsWithStripeState,
+  reconcilePendingCheckoutForListing,
+} from "@/lib/stripe-db";
 import { isValidUuid } from "@/lib/validation";
 
-// GET /api/listings/[id] - Get a specific listing by UUID
+// GET /api/listings/[id] - Get a specific listing by UUID enriched with seller Stripe Connect & sold status
 export async function GET(
   _request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -30,7 +34,11 @@ export async function GET(
       if (error || !data) {
         const sampleMatch = SAMPLE_LISTINGS.find((item) => item.id === id);
         if (sampleMatch) {
-          return NextResponse.json({ listing: sampleMatch });
+          const [enrichedSample] = await enrichListingsWithStripeState(
+            [sampleMatch],
+            { syncUnfinishedSellersWithStripe: true }
+          );
+          return NextResponse.json({ listing: enrichedSample });
         }
 
         return NextResponse.json(
@@ -39,7 +47,24 @@ export async function GET(
         );
       }
 
-      return NextResponse.json({ listing: data });
+      let [enriched] = await enrichListingsWithStripeState([data], {
+        syncUnfinishedSellersWithStripe: true,
+      });
+
+      if (!enriched.sold) {
+        const reconciledOrder = await reconcilePendingCheckoutForListing(
+          enriched
+        );
+        if (reconciledOrder) {
+          enriched = {
+            ...enriched,
+            status: "sold",
+            sold: true,
+          };
+        }
+      }
+
+      return NextResponse.json({ listing: enriched });
     }
 
     const listing = memoryStore.getListingById(id);
@@ -50,7 +75,11 @@ export async function GET(
       );
     }
 
-    return NextResponse.json({ listing });
+    const [enrichedFallback] = await enrichListingsWithStripeState([listing], {
+      syncUnfinishedSellersWithStripe: true,
+    });
+
+    return NextResponse.json({ listing: enrichedFallback });
   } catch (err) {
     console.error("Unexpected error in GET /api/listings/[id]:", err);
     return NextResponse.json(

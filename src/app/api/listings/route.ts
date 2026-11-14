@@ -6,6 +6,7 @@ import {
 } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
 import { memoryStore } from "@/lib/memory-store";
+import { enrichListingsWithStripeState } from "@/lib/stripe-db";
 import { checkRateLimit } from "@/lib/rate-limit";
 import {
   hasControlChars,
@@ -40,12 +41,9 @@ export async function GET(request: NextRequest) {
 
     if (isSupabaseConfigured()) {
       const db = getServerSupabaseClient();
-      // Select only public listing fields needed for the browse grid (omit bulk seller_email)
       let query = db
         .from("listings")
-        .select(
-          "id, title, description, price, category, image_url, location, created_at, updated_at"
-        )
+        .select("*")
         .order("created_at", { ascending: false })
         .limit(100);
 
@@ -69,8 +67,12 @@ export async function GET(request: NextRequest) {
         );
       }
 
+      const enriched = await enrichListingsWithStripeState(data || [], {
+        syncUnfinishedSellersWithStripe: true,
+      });
+
       return NextResponse.json({
-        listings: data || [],
+        listings: enriched,
         source: "supabase",
       });
     }
@@ -95,8 +97,13 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const enrichedFallback = await enrichListingsWithStripeState(
+      listings.slice(0, 100),
+      { syncUnfinishedSellersWithStripe: true }
+    );
+
     return NextResponse.json({
-      listings: listings.slice(0, 100).map(({ seller_email: _omit, ...rest }) => rest),
+      listings: enrichedFallback,
       source: "fallback",
     });
   } catch (err) {

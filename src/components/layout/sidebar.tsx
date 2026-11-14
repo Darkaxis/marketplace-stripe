@@ -11,6 +11,7 @@ import {
   Search,
   Settings,
   ChevronRight,
+  CreditCard,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -141,21 +142,33 @@ export function Sidebar({
         </Link>
 
         <Link
-          href="/"
-          className="flex items-center justify-between rounded-lg px-2.5 py-2 text-[15px] font-medium text-[#050505] transition-colors hover:bg-[#F0F2F5]"
+          href="/connect"
+          className={cn(
+            "flex items-center justify-between rounded-lg px-2.5 py-2 text-[15px] font-semibold transition-colors",
+            pathname?.startsWith("/connect")
+              ? "bg-[#635BFF]/10 text-[#635BFF]"
+              : "text-[#050505] hover:bg-[#F0F2F5]"
+          )}
         >
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-[#E4E6EB] text-[#050505]">
-              <ShoppingBag className="h-5 w-5" />
+            <div
+              className={cn(
+                "flex h-9 w-9 items-center justify-center rounded-full",
+                pathname?.startsWith("/connect")
+                  ? "bg-[#635BFF] text-white"
+                  : "bg-[#E4E6EB] text-[#050505]"
+              )}
+            >
+              <CreditCard className="h-5 w-5" />
             </div>
-            <span>Buying</span>
+            <span>Connect with Stripe</span>
           </div>
           <ChevronRight className="h-4 w-4 text-gray-400" />
         </Link>
       </div>
 
-      {/* Create New Listing CTA */}
-      <div className="mt-3">
+      {/* Create New Listing & Connect with Stripe CTAs */}
+      <div className="mt-3 space-y-2">
         <Button
           asChild
           className="h-10 w-full rounded-lg bg-[#E7F3FF] text-[15px] font-semibold text-[#1877F2] shadow-none hover:bg-[#DBE7F2]"
@@ -163,6 +176,16 @@ export function Sidebar({
           <Link href="/create/item">
             <Plus className="mr-1.5 h-4 w-4 stroke-[2.5]" />
             Create new listing
+          </Link>
+        </Button>
+
+        <Button
+          asChild
+          className="h-10 w-full rounded-lg bg-[#635BFF] text-[15px] font-semibold text-white shadow-none hover:bg-[#5249e0]"
+        >
+          <Link href="/connect">
+            <CreditCard className="mr-1.5 h-4 w-4" />
+            Connect with Stripe
           </Link>
         </Button>
       </div>

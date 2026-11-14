@@ -417,9 +417,23 @@ function CreateItemFormContent() {
 
             {/* Seller Email */}
             <div className="space-y-1.5">
-              <Label htmlFor="seller_email">
-                Your Contact Email <span className="text-red-500">*</span>
-              </Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="seller_email">
+                  Your Contact Email <span className="text-red-500">*</span>
+                </Label>
+                <Link
+                  href={
+                    sellerEmail.trim()
+                      ? `/connect?email=${encodeURIComponent(
+                          sellerEmail.trim()
+                        )}`
+                      : "/connect"
+                  }
+                  className="text-xs font-semibold text-[#635BFF] hover:underline"
+                >
+                  Connect with Stripe →
+                </Link>
+              </div>
               <div className="relative">
                 <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
                 <Input
