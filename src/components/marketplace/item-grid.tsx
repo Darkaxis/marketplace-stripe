@@ -40,6 +40,7 @@ export function ItemGrid({
   showCategoryPills = true,
 }: ItemGridProps) {
   const [listings, setListings] = useState<Listing[]>([]);
+  const [source, setSource] = useState<string>("supabase");
   const [loading, setLoading] = useState<boolean>(true);
   const [seeding, setSeeding] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,6 +80,7 @@ export function ItemGrid({
 
       const data = await response.json();
       setListings(data.listings || []);
+      setSource(data.source || "supabase");
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "An unexpected error occurred"
@@ -233,6 +235,8 @@ export function ItemGrid({
           <p className="mt-1 max-w-md text-sm text-gray-500">
             {localSearch || (activeCategory && activeCategory !== "all")
               ? "We couldn't find any items matching your current search or category filter. Try clearing your filters or create a new listing."
+              : source === "fallback"
+              ? "No database is connected yet, and no listings have been created."
               : "Your marketplace database doesn't have any listings yet. Be the first to list an item for sale or load sample marketplace listings!"}
           </p>
           <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
@@ -255,20 +259,22 @@ export function ItemGrid({
                 Create New Listing
               </Link>
             </Button>
-            {!localSearch && activeCategory === "all" && (
-              <Button
-                variant="outline"
-                onClick={handleSeedDemoData}
-                disabled={seeding}
-              >
-                {seeding ? (
-                  <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                ) : (
-                  <Sparkles className="mr-1.5 h-4 w-4 text-[#1877F2]" />
-                )}
-                Load Sample Listings
-              </Button>
-            )}
+            {source === "supabase" &&
+              !localSearch &&
+              activeCategory === "all" && (
+                <Button
+                  variant="outline"
+                  onClick={handleSeedDemoData}
+                  disabled={seeding}
+                >
+                  {seeding ? (
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="mr-1.5 h-4 w-4 text-[#1877F2]" />
+                  )}
+                  Load Sample Listings
+                </Button>
+              )}
           </div>
         </div>
       )}

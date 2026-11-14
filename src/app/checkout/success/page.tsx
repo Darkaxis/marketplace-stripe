@@ -114,7 +114,9 @@ function OrderSuccessContent() {
         <div className="mt-6 flex justify-center gap-3">
           {listingId && (
             <Button asChild variant="outline">
-              <Link href={`/item/${listingId}`}>View Listing</Link>
+              <Link href={`/item/${encodeURIComponent(listingId)}`}>
+                View Listing
+              </Link>
             </Button>
           )}
           <Button asChild className="bg-[#1877F2] hover:bg-[#166FE5]">

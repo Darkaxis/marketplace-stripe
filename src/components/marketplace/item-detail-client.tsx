@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
   MapPin,
@@ -50,6 +51,9 @@ const QUICK_MESSAGES = [
 ];
 
 export function ItemDetailClient({ id }: { id: string }) {
+  const searchParams = useSearchParams();
+  const checkoutCancelled = searchParams.get("checkout") === "cancelled";
+
   const [listing, setListing] = useState<Listing | null>(null);
   const [messages, setMessages] = useState<InquiryItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -330,6 +334,17 @@ export function ItemDetailClient({ id }: { id: string }) {
 
             {/* Buy Now / Sold / Unonboarded Seller Section */}
             <div className="mt-4 space-y-2.5">
+              {checkoutCancelled && !(listing.sold || listing.status === "sold") && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                  <span>
+                    Checkout was cancelled. You can click{" "}
+                    <strong className="font-semibold">Buy Now</strong> whenever
+                    you&apos;re ready.
+                  </span>
+                </div>
+              )}
+
               {checkoutError && (
                 <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-2.5 text-xs text-red-700">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-600" />
@@ -352,33 +367,44 @@ export function ItemDetailClient({ id }: { id: string }) {
                   </p>
                 </div>
               ) : listing.seller_onboarded ? (
-                <div className="rounded-xl border border-[#635BFF]/25 bg-[#635BFF]/5 p-3.5">
-                  <Button
-                    type="button"
-                    onClick={handleBuyNow}
-                    disabled={buyingNow}
-                    className="h-12 w-full bg-[#635BFF] text-base font-bold text-white shadow-xs hover:bg-[#5249e0]"
-                  >
-                    {buyingNow ? (
-                      <>
-                        <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                        Opening Stripe Checkout...
-                      </>
-                    ) : (
-                      <>
-                        <ShoppingBag className="mr-2 h-5 w-5" />
-                        Buy Now · {formatPrice(listing.price)}
-                      </>
-                    )}
-                  </Button>
-                  <p className="mt-2 text-center text-[11px] text-gray-600">
-                    Secure checkout via Stripe Connect · Seller receives{" "}
-                    <strong className="font-semibold text-[#050505]">
-                      {formatPrice(Math.round(Number(listing.price) * 90) / 100)}
-                    </strong>{" "}
-                    (10% platform fee)
-                  </p>
-                </div>
+                Number(listing.price) >= 0.5 &&
+                Number(listing.price) <= 999999.99 ? (
+                  <div className="rounded-xl border border-[#635BFF]/25 bg-[#635BFF]/5 p-3.5">
+                    <Button
+                      type="button"
+                      onClick={handleBuyNow}
+                      disabled={buyingNow}
+                      className="h-12 w-full bg-[#635BFF] text-base font-bold text-white shadow-xs hover:bg-[#5249e0]"
+                    >
+                      {buyingNow ? (
+                        <>
+                          <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                          Opening Stripe Checkout...
+                        </>
+                      ) : (
+                        <>
+                          <ShoppingBag className="mr-2 h-5 w-5" />
+                          Buy Now · {formatPrice(listing.price)}
+                        </>
+                      )}
+                    </Button>
+                    <p className="mt-2 text-center text-[11px] text-gray-600">
+                      Secure checkout via Stripe Connect · Seller receives{" "}
+                      <strong className="font-semibold text-[#050505]">
+                        {formatPrice(
+                          Math.round(Number(listing.price) * 90) / 100
+                        )}
+                      </strong>{" "}
+                      (10% platform fee)
+                    </p>
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-xs text-gray-700">
+                    {Number(listing.price) < 0.5
+                      ? "Items priced under $0.50 are arranged directly with the seller via message."
+                      : "Items over $999,999.99 exceed Stripe Checkout's single-transaction limit. Please contact the seller."}
+                  </div>
+                )
               ) : (
                 <div className="rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900">
                   <p className="font-medium">

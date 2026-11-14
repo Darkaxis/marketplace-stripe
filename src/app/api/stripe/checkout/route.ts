@@ -6,32 +6,36 @@ import {
 } from "@/lib/stripe";
 import {
   enrichListingsWithStripeState,
+  reconcilePendingCheckoutForListing,
   recordPendingCheckoutSession,
 } from "@/lib/stripe-db";
-import { isSupabaseConfigured, SAMPLE_LISTINGS } from "@/lib/supabase";
+import { isSupabaseConfigured } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
 import { memoryStore } from "@/lib/memory-store";
-import { isValidEmail, isValidUuid } from "@/lib/validation";
+import { checkRateLimit } from "@/lib/rate-limit";
+import {
+  getSafeSiteOrigin,
+  isValidEmail,
+  isValidUuid,
+} from "@/lib/validation";
 
-function getOrigin(request: NextRequest): string {
-  const forwardedHost = request.headers.get("x-forwarded-host");
-  const forwardedProto = request.headers.get("x-forwarded-proto") || "https";
-  if (forwardedHost) {
-    return `${forwardedProto}://${forwardedHost}`;
-  }
-  const origin = request.nextUrl.origin;
-  if (origin && origin !== "null") {
-    return origin.replace(/\/+$/, "");
-  }
-  return (
-    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
-    "http://localhost:3000"
-  );
-}
+const MIN_CHECKOUT_CENTS = 50; // $0.50 USD Stripe minimum
+const MAX_CHECKOUT_CENTS = 99_999_999; // $999,999.99 USD Stripe Checkout maximum
 
 // POST /api/stripe/checkout - Create a Stripe Checkout session (Direct Charge on Seller's Connected Account with 10% Platform Fee)
 export async function POST(request: NextRequest) {
   try {
+    const rate = checkRateLimit(request, "stripe-checkout", 20, 10 * 60 * 1000);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: "Too many checkout requests. Please try again shortly." },
+        {
+          status: 429,
+          headers: { "Retry-After": String(rate.retryAfterSeconds) },
+        }
+      );
+    }
+
     if (!isStripeConfigured()) {
       return NextResponse.json(
         { error: "Stripe is not configured on the server" },
@@ -59,8 +63,7 @@ export async function POST(request: NextRequest) {
         .select("*")
         .eq("id", cleanId)
         .single();
-      rawListing =
-        data || SAMPLE_LISTINGS.find((item) => item.id === cleanId) || null;
+      rawListing = data || null;
     } else {
       rawListing = memoryStore.getListingById(cleanId);
     }
@@ -72,9 +75,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const [listing] = await enrichListingsWithStripeState([rawListing], {
+    let [listing] = await enrichListingsWithStripeState([rawListing], {
       syncUnfinishedSellersWithStripe: true,
     });
+
+    if (!listing.sold && listing.status !== "sold") {
+      const reconciled = await reconcilePendingCheckoutForListing(listing);
+      if (reconciled) {
+        listing = { ...listing, sold: true, status: "sold" };
+      }
+    }
 
     if (listing.sold || listing.status === "sold") {
       return NextResponse.json(
@@ -94,9 +104,18 @@ export async function POST(request: NextRequest) {
     }
 
     const unitAmount = Math.round(Number(listing.price) * 100);
-    if (!Number.isFinite(unitAmount) || unitAmount < 50) {
+    if (!Number.isFinite(unitAmount) || unitAmount < MIN_CHECKOUT_CENTS) {
       return NextResponse.json(
         { error: "Listing price must be at least $0.50 for Stripe Checkout." },
+        { status: 400 }
+      );
+    }
+    if (unitAmount > MAX_CHECKOUT_CENTS) {
+      return NextResponse.json(
+        {
+          error:
+            "Listing price exceeds Stripe Checkout's $999,999.99 single-transaction limit.",
+        },
         { status: 400 }
       );
     }
@@ -104,7 +123,7 @@ export async function POST(request: NextRequest) {
     const applicationFeeAmount = calculatePlatformFeeCents(unitAmount);
     const sellerAccountId = listing.seller_stripe_account_id;
     const stripe = getStripe();
-    const origin = getOrigin(request);
+    const origin = getSafeSiteOrigin(request);
 
     const session = await stripe.checkout.sessions.create(
       {

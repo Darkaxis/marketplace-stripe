@@ -68,11 +68,16 @@ export async function GET(request: NextRequest) {
       }
 
       const enriched = await enrichListingsWithStripeState(data || [], {
-        syncUnfinishedSellersWithStripe: true,
+        syncUnfinishedSellersWithStripe: false,
       });
 
+      const publicListings = enriched.map(
+        ({ seller_email: _omitEmail, seller_stripe_account_id: _omitAcct, ...rest }) =>
+          rest
+      );
+
       return NextResponse.json({
-        listings: enriched,
+        listings: publicListings,
         source: "supabase",
       });
     }
@@ -99,11 +104,14 @@ export async function GET(request: NextRequest) {
 
     const enrichedFallback = await enrichListingsWithStripeState(
       listings.slice(0, 100),
-      { syncUnfinishedSellersWithStripe: true }
+      { syncUnfinishedSellersWithStripe: false }
     );
 
     return NextResponse.json({
-      listings: enrichedFallback,
+      listings: enrichedFallback.map(
+        ({ seller_email: _omitEmail, seller_stripe_account_id: _omitAcct, ...rest }) =>
+          rest
+      ),
       source: "fallback",
     });
   } catch (err) {
@@ -194,11 +202,8 @@ export async function POST(request: NextRequest) {
       }
 
       return NextResponse.json(
-        {
-          listings: memoryStore.getListings(),
-          message: "Sample listings loaded",
-        },
-        { status: 200 }
+        { error: "Database is not configured. Connect Supabase to load sample listings." },
+        { status: 503 }
       );
     }
 

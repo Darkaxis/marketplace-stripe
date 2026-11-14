@@ -283,11 +283,10 @@ export function getSafeSiteOrigin(request: {
   const origin = request.nextUrl.origin;
   try {
     const parsed = new URL(origin);
-    if (
-      parsed.protocol === "https:" ||
-      (parsed.protocol === "http:" &&
-        (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1"))
-    ) {
+    if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+      return `http://${parsed.host}`;
+    }
+    if (parsed.protocol === "https:") {
       return parsed.origin;
     }
   } catch {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { isSupabaseConfigured, SAMPLE_LISTINGS } from "@/lib/supabase";
+import { isSupabaseConfigured } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
 import { memoryStore } from "@/lib/memory-store";
 import {
@@ -7,6 +7,13 @@ import {
   reconcilePendingCheckoutForListing,
 } from "@/lib/stripe-db";
 import { isValidUuid } from "@/lib/validation";
+
+function toPublicDetailListing<
+  T extends { seller_stripe_account_id?: string | null }
+>(listing: T): Omit<T, "seller_stripe_account_id"> {
+  const { seller_stripe_account_id: _omit, ...rest } = listing;
+  return rest;
+}
 
 // GET /api/listings/[id] - Get a specific listing by UUID enriched with seller Stripe Connect & sold status
 export async function GET(
@@ -32,15 +39,6 @@ export async function GET(
         .single();
 
       if (error || !data) {
-        const sampleMatch = SAMPLE_LISTINGS.find((item) => item.id === id);
-        if (sampleMatch) {
-          const [enrichedSample] = await enrichListingsWithStripeState(
-            [sampleMatch],
-            { syncUnfinishedSellersWithStripe: true }
-          );
-          return NextResponse.json({ listing: enrichedSample });
-        }
-
         return NextResponse.json(
           { error: "Listing not found" },
           { status: 404 }
@@ -64,7 +62,7 @@ export async function GET(
         }
       }
 
-      return NextResponse.json({ listing: enriched });
+      return NextResponse.json({ listing: toPublicDetailListing(enriched) });
     }
 
     const listing = memoryStore.getListingById(id);
@@ -79,7 +77,9 @@ export async function GET(
       syncUnfinishedSellersWithStripe: true,
     });
 
-    return NextResponse.json({ listing: enrichedFallback });
+    return NextResponse.json({
+      listing: toPublicDetailListing(enrichedFallback),
+    });
   } catch (err) {
     console.error("Unexpected error in GET /api/listings/[id]:", err);
     return NextResponse.json(

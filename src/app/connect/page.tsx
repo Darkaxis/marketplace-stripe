@@ -12,10 +12,8 @@ import {
   Loader2,
   Mail,
   RefreshCw,
-  ShieldCheck,
   ShoppingBag,
   Sparkles,
-  Store,
   AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -37,26 +35,11 @@ function ConnectWithStripeContent() {
   const [email, setEmail] = useState(initialEmail);
   const [seller, setSeller] = useState<SellerAccount | null>(null);
   const [sellerListings, setSellerListings] = useState<Listing[]>([]);
-  const [suggestedEmails, setSuggestedEmails] = useState<string[]>([]);
-  const [knownSellers, setKnownSellers] = useState<SellerAccount[]>([]);
 
   const [connecting, setConnecting] = useState(false);
   const [checkingStatus, setCheckingStatus] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-
-  const fetchOverview = useCallback(async () => {
-    try {
-      const res = await fetch("/api/stripe/connect");
-      if (res.ok) {
-        const data = await res.json();
-        setSuggestedEmails(data.suggestedEmails || []);
-        setKnownSellers(data.sellers || []);
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
 
   const checkSellerStatus = useCallback(
     async (targetEmail: string, accountId?: string) => {
@@ -79,7 +62,6 @@ function ConnectWithStripeContent() {
 
         setSeller(data.seller || null);
         setSellerListings(data.listings || []);
-        await fetchOverview();
       } catch (err) {
         setError(
           err instanceof Error
@@ -90,12 +72,8 @@ function ConnectWithStripeContent() {
         setCheckingStatus(false);
       }
     },
-    [fetchOverview]
+    []
   );
-
-  useEffect(() => {
-    fetchOverview();
-  }, [fetchOverview]);
 
   useEffect(() => {
     if (initialEmail) {
@@ -111,7 +89,27 @@ function ConnectWithStripeContent() {
         );
       }
     }
-  }, [initialEmail, initialAccountId, onboardingParam, refreshParam, checkSellerStatus]);
+  }, [
+    initialEmail,
+    initialAccountId,
+    onboardingParam,
+    refreshParam,
+    checkSellerStatus,
+  ]);
+
+  // If Stripe received details_submitted=true and charges_enabled is briefly pending, recheck automatically once
+  useEffect(() => {
+    if (
+      seller &&
+      seller.details_submitted &&
+      (!seller.charges_enabled || !seller.onboarding_complete)
+    ) {
+      const timer = setTimeout(() => {
+        checkSellerStatus(seller.email, seller.stripe_account_id);
+      }, 2500);
+      return () => clearTimeout(timer);
+    }
+  }, [seller, checkSellerStatus]);
 
   const handleConnectWithStripe = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -134,10 +132,24 @@ function ConnectWithStripeContent() {
       });
 
       const data = await res.json();
-      if (!res.ok || !data.url) {
+      if (!res.ok) {
         throw new Error(
           data.error || "Failed to generate Stripe Connect onboarding link"
         );
+      }
+
+      if (data.alreadyOnboarded && data.seller) {
+        setSeller(data.seller);
+        setStatusMessage(
+          "This seller email has already completed Stripe Connect onboarding."
+        );
+        await checkSellerStatus(clean);
+        setConnecting(false);
+        return;
+      }
+
+      if (!data.url) {
+        throw new Error("Stripe did not return an onboarding link.");
       }
 
       window.location.href = data.url;
@@ -276,46 +288,6 @@ function ConnectWithStripeContent() {
                 )}
               </div>
             </div>
-
-            {/* Quick Select Existing Listing Sellers */}
-            {suggestedEmails.length > 0 && (
-              <div className="space-y-1.5 pt-1">
-                <p className="text-xs font-semibold text-gray-500">
-                  Quick-select an existing seller email from Marketplace:
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  {suggestedEmails.slice(0, 8).map((suggested) => {
-                    const existingRecord = knownSellers.find(
-                      (s) => s.email.toLowerCase() === suggested.toLowerCase()
-                    );
-                    const isOnboarded = Boolean(
-                      existingRecord?.onboarding_complete &&
-                        existingRecord?.charges_enabled
-                    );
-                    return (
-                      <button
-                        key={suggested}
-                        type="button"
-                        onClick={() => {
-                          setEmail(suggested);
-                          checkSellerStatus(suggested);
-                        }}
-                        className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
-                          email.trim().toLowerCase() === suggested.toLowerCase()
-                            ? "border-[#635BFF] bg-[#635BFF]/10 text-[#635BFF]"
-                            : "border-gray-200 bg-gray-50 text-gray-700 hover:border-[#635BFF] hover:bg-white"
-                        }`}
-                      >
-                        <span>{suggested}</span>
-                        {isOnboarded && (
-                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
           </form>
 
           {/* Connected Seller Status Card */}
@@ -341,6 +313,8 @@ function ConnectWithStripeContent() {
                         <h2 className="text-base font-bold text-[#050505]">
                           {isFullyOnboarded
                             ? "Stripe Connect Onboarding Complete!"
+                            : seller.details_submitted
+                            ? "Onboarding Submitted — Finalizing Stripe Activation..."
                             : "Stripe Account Created — Finish Onboarding"}
                         </h2>
                         <Badge
@@ -352,6 +326,8 @@ function ConnectWithStripeContent() {
                         >
                           {isFullyOnboarded
                             ? "Buy Now Enabled"
+                            : seller.details_submitted
+                            ? "Verifying"
                             : "Onboarding Pending"}
                         </Badge>
                       </div>
@@ -366,7 +342,7 @@ function ConnectWithStripeContent() {
                     </div>
                   </div>
 
-                  {!isFullyOnboarded && (
+                  {!isFullyOnboarded && !seller.details_submitted && (
                     <Button
                       type="button"
                       onClick={handleConnectWithStripe}
@@ -454,20 +430,20 @@ function ConnectWithStripeContent() {
               <span>Stripe Sandbox Quick Test Values</span>
             </div>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-              <div className="rounded-lg bg-white p-2.5 border border-gray-200/80">
-                <span className="text-gray-500 block">Phone & SMS Code</span>
+              <div className="rounded-lg border border-gray-200/80 bg-white p-2.5">
+                <span className="block text-gray-500">Phone & SMS Code</span>
                 <strong className="font-mono text-[#050505]">
                   000-000-0000 / 000000
                 </strong>
               </div>
-              <div className="rounded-lg bg-white p-2.5 border border-gray-200/80">
-                <span className="text-gray-500 block">DOB & SSN Last 4</span>
+              <div className="rounded-lg border border-gray-200/80 bg-white p-2.5">
+                <span className="block text-gray-500">DOB & SSN Last 4</span>
                 <strong className="font-mono text-[#050505]">
                   01/01/1990 · SSN 0000
                 </strong>
               </div>
-              <div className="rounded-lg bg-white p-2.5 border border-gray-200/80">
-                <span className="text-gray-500 block">Payout Account</span>
+              <div className="rounded-lg border border-gray-200/80 bg-white p-2.5">
+                <span className="block text-gray-500">Payout Account</span>
                 <strong className="text-[#050505]">
                   Click &ldquo;Use test account&rdquo;
                 </strong>

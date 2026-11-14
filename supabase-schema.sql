@@ -24,7 +24,7 @@ ALTER TABLE listings ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'availa
 ALTER TABLE listings ADD COLUMN IF NOT EXISTS sold BOOLEAN DEFAULT FALSE;
 ALTER TABLE listings ADD COLUMN IF NOT EXISTS seller_stripe_account_id VARCHAR(255);
 
--- 2. Sellers table (Stripe Connect Onboarding)
+-- 2. Sellers table (Stripe Connect Onboarding — server-managed via service_role)
 CREATE TABLE IF NOT EXISTS sellers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email VARCHAR(255) UNIQUE NOT NULL,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS sellers (
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 3. Orders table (Stripe Checkout & Connect Payout Records)
+-- 3. Orders table (Stripe Checkout & Connect Payout Records — server-managed via service_role)
 CREATE TABLE IF NOT EXISTS orders (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   listing_id UUID REFERENCES listings(id) ON DELETE SET NULL,
@@ -65,12 +65,16 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 5. Storage bucket for listing images
+-- 5. Storage buckets: public bucket for listing images, private bucket for Stripe state
 INSERT INTO storage.buckets (id, name, public)
 VALUES ('listing-images', 'listing-images', true)
 ON CONFLICT (id) DO NOTHING;
 
--- Storage policies
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('stripe-connect-state', 'stripe-connect-state', false)
+ON CONFLICT (id) DO NOTHING;
+
+-- Storage policies (only for listing-images; stripe-connect-state is private / service_role only)
 DROP POLICY IF EXISTS "Anyone can upload listing images" ON storage.objects;
 CREATE POLICY "Anyone can upload listing images" ON storage.objects
 FOR INSERT WITH CHECK (bucket_id = 'listing-images');
@@ -95,7 +99,7 @@ ALTER TABLE sellers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 
--- Policies for listings
+-- Policies for listings: public read; writes and status updates happen via server API (service_role)
 DROP POLICY IF EXISTS "Anyone can view listings" ON listings;
 CREATE POLICY "Anyone can view listings" ON listings FOR SELECT USING (true);
 
@@ -103,24 +107,16 @@ DROP POLICY IF EXISTS "Anyone can create listings" ON listings;
 CREATE POLICY "Anyone can create listings" ON listings FOR INSERT WITH CHECK (true);
 
 DROP POLICY IF EXISTS "Anyone can update listings" ON listings;
-CREATE POLICY "Anyone can update listings" ON listings FOR UPDATE USING (true);
+DROP POLICY IF EXISTS "Users can update their own listings" ON listings;
+CREATE POLICY "Users can update their own listings" ON listings
+FOR UPDATE USING (seller_email = current_setting('request.jwt.claims', true)::json->>'email');
 
--- Policies for sellers
+-- Policies for sellers & orders: locked down (no anon access; server uses SUPABASE_SERVICE_ROLE_KEY)
 DROP POLICY IF EXISTS "Anyone can view sellers" ON sellers;
-CREATE POLICY "Anyone can view sellers" ON sellers FOR SELECT USING (true);
-
 DROP POLICY IF EXISTS "Anyone can upsert sellers" ON sellers;
-CREATE POLICY "Anyone can upsert sellers" ON sellers FOR INSERT WITH CHECK (true);
-
 DROP POLICY IF EXISTS "Anyone can update sellers" ON sellers;
-CREATE POLICY "Anyone can update sellers" ON sellers FOR UPDATE USING (true);
-
--- Policies for orders
 DROP POLICY IF EXISTS "Anyone can view orders" ON orders;
-CREATE POLICY "Anyone can view orders" ON orders FOR SELECT USING (true);
-
 DROP POLICY IF EXISTS "Anyone can create orders" ON orders;
-CREATE POLICY "Anyone can create orders" ON orders FOR INSERT WITH CHECK (true);
 
 -- Policies for messages
 DROP POLICY IF EXISTS "Anyone can view messages" ON messages;

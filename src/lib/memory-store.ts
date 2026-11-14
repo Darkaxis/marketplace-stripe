@@ -2,7 +2,6 @@ import {
   Listing,
   Message,
   OrderRecord,
-  SAMPLE_LISTINGS,
   SellerAccount,
 } from "@/lib/supabase";
 
@@ -17,21 +16,11 @@ const globalForStore = globalThis as unknown as {
 };
 
 if (!globalForStore.fallbackListings) {
-  globalForStore.fallbackListings = [...SAMPLE_LISTINGS];
+  globalForStore.fallbackListings = [];
 }
 
 if (!globalForStore.fallbackMessages) {
-  globalForStore.fallbackMessages = [
-    {
-      id: "22222222-2222-4222-8222-222222222201",
-      listing_id: "11111111-1111-4111-8111-111111111101",
-      buyer_email: "jamie.buyer@gmail.com",
-      seller_email: "alex.chen@stanford.edu",
-      message:
-        "Hi! Is this MacBook Pro still available? Can I pick it up in Palo Alto today?",
-      created_at: new Date(Date.now() - 45 * 60 * 1000).toISOString(),
-    },
-  ];
+  globalForStore.fallbackMessages = [];
 }
 
 if (!globalForStore.fallbackSellers) {

@@ -7,12 +7,18 @@ import {
 import {
   enrichListingsWithStripeState,
   getOrderBySessionId,
+  getSellerByEmail,
   recordCompletedOrder,
 } from "@/lib/stripe-db";
-import { isSupabaseConfigured, SAMPLE_LISTINGS } from "@/lib/supabase";
+import { isSupabaseConfigured } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
 import { memoryStore } from "@/lib/memory-store";
-import { isValidUuid } from "@/lib/validation";
+import {
+  isValidStripeAccountId,
+  isValidStripeSessionId,
+  isValidUuid,
+  maskEmail,
+} from "@/lib/validation";
 
 // GET /api/stripe/order-success?session_id=cs_test_...&listing_id=...&acct=acct_...
 export async function GET(request: NextRequest) {
@@ -22,7 +28,7 @@ export async function GET(request: NextRequest) {
     const rawListingId = searchParams.get("listing_id")?.trim() || "";
     const rawAcct = searchParams.get("acct")?.trim() || "";
 
-    if (!sessionId || !sessionId.startsWith("cs_")) {
+    if (!isValidStripeSessionId(sessionId)) {
       return NextResponse.json(
         { error: "A valid Stripe Checkout session_id is required" },
         { status: 400 }
@@ -31,7 +37,6 @@ export async function GET(request: NextRequest) {
 
     let order = await getOrderBySessionId(sessionId);
 
-    // Look up listing if listing_id is known
     const targetListingId = order?.listing_id || rawListingId;
     let rawListing = null;
 
@@ -43,10 +48,7 @@ export async function GET(request: NextRequest) {
           .select("*")
           .eq("id", targetListingId)
           .single();
-        rawListing =
-          data ||
-          SAMPLE_LISTINGS.find((item) => item.id === targetListingId) ||
-          null;
+        rawListing = data || null;
       } else {
         rawListing = memoryStore.getListingById(targetListingId);
       }
@@ -58,14 +60,18 @@ export async function GET(request: NextRequest) {
       enrichedListing = enriched;
     }
 
-    // Verify directly with Stripe on the connected account (or platform) and ensure Supabase order + Sold status are recorded
-    if (isStripeConfigured()) {
+    // If webhook hasn't recorded the order yet, verify directly with Stripe using the seller's verified connected account
+    if (!order && isStripeConfigured()) {
       const stripe = getStripe();
+      const dbSeller = rawListing
+        ? await getSellerByEmail(rawListing.seller_email)
+        : null;
+
+      // Always prefer the DB-verified connected account for this listing/order
       const stripeAccountId =
-        rawAcct ||
-        order?.seller_stripe_account_id ||
+        dbSeller?.stripe_account_id ||
         enrichedListing?.seller_stripe_account_id ||
-        "";
+        (isValidStripeAccountId(rawAcct) ? rawAcct : "");
 
       try {
         const session = stripeAccountId
@@ -78,8 +84,7 @@ export async function GET(request: NextRequest) {
               expand: ["payment_intent"],
             });
 
-        const metaListingId =
-          session.metadata?.listing_id?.trim() || targetListingId;
+        const metaListingId = session.metadata?.listing_id?.trim() || "";
 
         if (!rawListing && isValidUuid(metaListingId)) {
           if (isSupabaseConfigured()) {
@@ -89,51 +94,68 @@ export async function GET(request: NextRequest) {
               .select("*")
               .eq("id", metaListingId)
               .single();
-            rawListing =
-              data ||
-              SAMPLE_LISTINGS.find((item) => item.id === metaListingId) ||
-              null;
+            rawListing = data || null;
           } else {
             rawListing = memoryStore.getListingById(metaListingId);
           }
         }
 
-        if (session.payment_status === "paid" && rawListing) {
-          const totalCents =
-            session.amount_total ??
-            Math.round(Number(rawListing.price) * 100);
-          const feeCents = session.metadata?.platform_fee_cents
-            ? Number(session.metadata.platform_fee_cents)
-            : calculatePlatformFeeCents(totalCents);
+        if (rawListing) {
+          const listingSeller =
+            dbSeller || (await getSellerByEmail(rawListing.seller_email));
+          const expectedSellerAcct = listingSeller?.stripe_account_id || "";
+          const expectedMinCents = Math.round(Number(rawListing.price) * 100);
 
-          const amountTotal = Math.round(totalCents) / 100;
-          const platformFee = Math.round(feeCents) / 100;
-          const sellerPayout =
-            Math.round((amountTotal - platformFee) * 100) / 100;
+          const listingMatches =
+            metaListingId === rawListing.id &&
+            (!expectedSellerAcct || stripeAccountId === expectedSellerAcct) &&
+            (!session.metadata?.seller_stripe_account_id ||
+              session.metadata.seller_stripe_account_id === stripeAccountId);
 
-          const paymentIntentId =
-            typeof session.payment_intent === "string"
-              ? session.payment_intent
-              : session.payment_intent?.id || null;
+          if (
+            session.payment_status === "paid" &&
+            listingMatches &&
+            (session.amount_total ?? 0) >= expectedMinCents
+          ) {
+            const totalCents = session.amount_total ?? expectedMinCents;
+            const metaFeeCents = Number(session.metadata?.platform_fee_cents);
+            const feeCents =
+              Number.isFinite(metaFeeCents) && metaFeeCents >= 0
+                ? metaFeeCents
+                : calculatePlatformFeeCents(totalCents);
 
-          order = await recordCompletedOrder({
-            listing_id: rawListing.id,
-            listing_title: rawListing.title,
-            seller_email: rawListing.seller_email,
-            seller_stripe_account_id:
-              stripeAccountId ||
-              session.metadata?.seller_stripe_account_id ||
-              "",
-            buyer_email:
-              session.customer_details?.email || session.customer_email || null,
-            amount_total: amountTotal,
-            platform_fee: platformFee,
-            seller_payout: sellerPayout,
-            currency: session.currency || "usd",
-            stripe_checkout_session_id: session.id,
-            stripe_payment_intent_id: paymentIntentId,
-            status: "paid",
-          });
+            const amountTotal = Math.round(totalCents) / 100;
+            const platformFee = Math.round(feeCents) / 100;
+            const sellerPayout =
+              Math.round((amountTotal - platformFee) * 100) / 100;
+
+            const paymentIntentId =
+              typeof session.payment_intent === "string"
+                ? session.payment_intent
+                : session.payment_intent?.id || null;
+
+            order = await recordCompletedOrder({
+              listing_id: rawListing.id,
+              listing_title: rawListing.title,
+              seller_email: rawListing.seller_email,
+              seller_stripe_account_id:
+                expectedSellerAcct ||
+                stripeAccountId ||
+                session.metadata?.seller_stripe_account_id ||
+                "",
+              buyer_email:
+                session.customer_details?.email ||
+                session.customer_email ||
+                null,
+              amount_total: amountTotal,
+              platform_fee: platformFee,
+              seller_payout: sellerPayout,
+              currency: session.currency || "usd",
+              stripe_checkout_session_id: session.id,
+              stripe_payment_intent_id: paymentIntentId,
+              status: "paid",
+            });
+          }
         }
       } catch (err) {
         console.error("Stripe session verification error on success page:", err);
@@ -142,7 +164,8 @@ export async function GET(request: NextRequest) {
 
     if (rawListing) {
       const [refreshed] = await enrichListingsWithStripeState([rawListing]);
-      enrichedListing = refreshed;
+      const { seller_stripe_account_id: _omit, ...publicListing } = refreshed;
+      enrichedListing = publicListing;
     }
 
     if (!order) {
@@ -153,7 +176,10 @@ export async function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
-      order,
+      order: {
+        ...order,
+        buyer_email: order.buyer_email ? maskEmail(order.buyer_email) : null,
+      },
       listing: enrichedListing,
     });
   } catch (err) {

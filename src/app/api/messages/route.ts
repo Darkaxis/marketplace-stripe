@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   isSupabaseConfigured,
-  SAMPLE_LISTINGS,
   type Message,
 } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
@@ -148,20 +147,8 @@ export async function POST(request: NextRequest) {
         .single();
 
       if (listingErr || !listing) {
-        // Check if it's an unseeded sample listing
-        const sampleListing = SAMPLE_LISTINGS.find(
-          (item) => item.id === cleanListingId
-        );
-        if (!sampleListing) {
-          return NextResponse.json(
-            { error: "Listing not found" },
-            { status: 404 }
-          );
-        }
-
-        // For static demo sample listings not yet inserted into DB, require seeding first or send safely to memory
         return NextResponse.json(
-          { error: "Please load sample listings into the database before messaging" },
+          { error: "Listing not found" },
           { status: 404 }
         );
       }

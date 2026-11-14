@@ -11,7 +11,7 @@ import {
   recordCompletedOrder,
   saveSellerAccount,
 } from "@/lib/stripe-db";
-import { isSupabaseConfigured, SAMPLE_LISTINGS } from "@/lib/supabase";
+import { isSupabaseConfigured } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
 import { memoryStore } from "@/lib/memory-store";
 import { isValidUuid } from "@/lib/validation";
@@ -66,12 +66,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 1. Handle checkout.session.completed (Confirm payment, record order in Supabase, mark listing as Sold)
+    // 1. Handle checkout.session.completed / async_payment_succeeded
     if (
       event.type === "checkout.session.completed" ||
       event.type === "checkout.session.async_payment_succeeded"
     ) {
       const session = event.data.object as Stripe.Checkout.Session;
+
+      // Only finalize when payment has actually settled
+      if (session.payment_status !== "paid") {
+        return NextResponse.json(
+          { received: true, ignored: true, reason: "payment_not_paid" },
+          { status: 200 }
+        );
+      }
+
       const listingId = session.metadata?.listing_id?.trim() || "";
 
       // Shared sandbox safety: ignore events without a valid listing_id in our database
@@ -90,10 +99,7 @@ export async function POST(request: NextRequest) {
           .select("*")
           .eq("id", listingId)
           .single();
-        listing =
-          data ||
-          SAMPLE_LISTINGS.find((item) => item.id === listingId) ||
-          null;
+        listing = data || null;
       } else {
         listing = memoryStore.getListingById(listingId);
       }
@@ -106,23 +112,48 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // Verify the connected account matches the listing's onboarded seller in our DB
+      const seller = await getSellerByEmail(listing.seller_email);
+      const eventAccountId =
+        event.account ||
+        session.metadata?.seller_stripe_account_id?.trim() ||
+        "";
+
+      if (
+        !seller ||
+        !seller.stripe_account_id ||
+        (eventAccountId && eventAccountId !== seller.stripe_account_id)
+      ) {
+        return NextResponse.json(
+          { received: true, ignored: true, reason: "seller_account_mismatch" },
+          { status: 200 }
+        );
+      }
+
+      const expectedMinCents = Math.round(Number(listing.price) * 100);
+      const metaAmountCents = Number(session.metadata?.amount_total_cents);
       const totalCents =
         session.amount_total ??
-        Number(session.metadata?.amount_total_cents || 0) ??
-        Math.round(Number(listing.price) * 100);
-      const feeCents = session.metadata?.platform_fee_cents
-        ? Number(session.metadata.platform_fee_cents)
-        : calculatePlatformFeeCents(totalCents);
+        (Number.isFinite(metaAmountCents) && metaAmountCents > 0
+          ? metaAmountCents
+          : expectedMinCents);
+
+      if (totalCents < expectedMinCents) {
+        return NextResponse.json(
+          { received: true, ignored: true, reason: "amount_mismatch" },
+          { status: 200 }
+        );
+      }
+
+      const metaFeeCents = Number(session.metadata?.platform_fee_cents);
+      const feeCents =
+        Number.isFinite(metaFeeCents) && metaFeeCents >= 0
+          ? metaFeeCents
+          : calculatePlatformFeeCents(totalCents);
 
       const amountTotal = Math.round(totalCents) / 100;
       const platformFee = Math.round(feeCents) / 100;
       const sellerPayout = Math.round((amountTotal - platformFee) * 100) / 100;
-
-      const connectedAccountId =
-        event.account ||
-        session.metadata?.seller_stripe_account_id ||
-        listing.seller_stripe_account_id ||
-        "";
 
       const paymentIntentId =
         typeof session.payment_intent === "string"
@@ -133,7 +164,7 @@ export async function POST(request: NextRequest) {
         listing_id: listing.id,
         listing_title: listing.title,
         seller_email: listing.seller_email,
-        seller_stripe_account_id: connectedAccountId,
+        seller_stripe_account_id: seller.stripe_account_id,
         buyer_email:
           session.customer_details?.email || session.customer_email || null,
         amount_total: amountTotal,
@@ -151,50 +182,34 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 2. Handle account.updated (Update seller's Stripe Connect onboarding status in Supabase)
+    // 2. Handle account.updated (Update already-tracked seller's Stripe Connect onboarding status in Supabase)
     if (event.type === "account.updated") {
       const account = event.data.object as Stripe.Account;
       const accountId = account.id;
 
-      let existingSeller = await getSellerByStripeAccountId(accountId);
-      const metaEmail = account.metadata?.seller_email?.trim().toLowerCase();
-
-      if (
-        !existingSeller &&
-        metaEmail &&
-        account.metadata?.platform === "marketplace-stripe"
-      ) {
-        existingSeller = await getSellerByEmail(metaEmail);
-      }
-
-      const targetEmail = existingSeller?.email || metaEmail || "";
-
-      // Shared sandbox safety: ignore account.updated events for accounts we didn't create/recognize
-      if (
-        !existingSeller &&
-        account.metadata?.platform !== "marketplace-stripe"
-      ) {
+      // Only update accounts already created & tracked in our Supabase database
+      // (prevents shared-sandbox spoofing via crafted metadata)
+      const existingSeller = await getSellerByStripeAccountId(accountId);
+      if (!existingSeller) {
         return NextResponse.json(
           { received: true, ignored: true, reason: "external_account" },
           { status: 200 }
         );
       }
 
-      if (targetEmail) {
-        const chargesEnabled = Boolean(account.charges_enabled);
-        const payoutsEnabled = Boolean(account.payouts_enabled);
-        const detailsSubmitted = Boolean(account.details_submitted);
-        const onboardingComplete = Boolean(chargesEnabled && detailsSubmitted);
+      const chargesEnabled = Boolean(account.charges_enabled);
+      const payoutsEnabled = Boolean(account.payouts_enabled);
+      const detailsSubmitted = Boolean(account.details_submitted);
+      const onboardingComplete = Boolean(chargesEnabled && detailsSubmitted);
 
-        await saveSellerAccount({
-          email: targetEmail,
-          stripe_account_id: accountId,
-          onboarding_complete: onboardingComplete,
-          charges_enabled: chargesEnabled,
-          payouts_enabled: payoutsEnabled,
-          details_submitted: detailsSubmitted,
-        });
-      }
+      await saveSellerAccount({
+        email: existingSeller.email,
+        stripe_account_id: accountId,
+        onboarding_complete: onboardingComplete,
+        charges_enabled: chargesEnabled,
+        payouts_enabled: payoutsEnabled,
+        details_submitted: detailsSubmitted,
+      });
 
       return NextResponse.json(
         { received: true, account_id: accountId },

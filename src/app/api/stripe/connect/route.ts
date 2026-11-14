@@ -2,61 +2,59 @@ import { NextRequest, NextResponse } from "next/server";
 import { getStripe, isStripeConfigured } from "@/lib/stripe";
 import {
   enrichListingsWithStripeState,
-  getAllSellersMap,
   getSellerByEmail,
   saveSellerAccount,
 } from "@/lib/stripe-db";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { getServerSupabaseClient } from "@/lib/supabase-admin";
 import { memoryStore } from "@/lib/memory-store";
-import { isValidEmail } from "@/lib/validation";
+import { checkRateLimit } from "@/lib/rate-limit";
+import {
+  getSafeSiteOrigin,
+  isValidEmail,
+  isValidStripeAccountId,
+} from "@/lib/validation";
 
-function getOrigin(request: NextRequest): string {
-  const forwardedHost = request.headers.get("x-forwarded-host");
-  const forwardedProto = request.headers.get("x-forwarded-proto") || "https";
-  if (forwardedHost) {
-    return `${forwardedProto}://${forwardedHost}`;
-  }
-  const origin = request.nextUrl.origin;
-  if (origin && origin !== "null") {
-    return origin.replace(/\/+$/, "");
-  }
-  return (
-    process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/+$/, "") ||
-    "http://localhost:3000"
-  );
-}
-
-// GET /api/stripe/connect - Get seller onboarding status (and sync with Stripe when returning from onboarding)
+// GET /api/stripe/connect?email=... - Check a seller's Stripe Connect onboarding status & their listings
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const rawEmail = searchParams.get("email")?.trim() || "";
     const rawAccountId = searchParams.get("account_id")?.trim() || "";
 
-    if (rawEmail) {
-      if (!isValidEmail(rawEmail)) {
-        return NextResponse.json(
-          { error: "Please provide a valid seller email address" },
-          { status: 400 }
-        );
-      }
-
-      const cleanEmail = rawEmail.toLowerCase();
-      let seller = await getSellerByEmail(cleanEmail, {
-        refreshFromStripe: true,
+    if (!rawEmail) {
+      return NextResponse.json({
+        configured: isStripeConfigured(),
       });
+    }
 
-      // If returning from Stripe with account_id and not yet synced, fetch directly from Stripe and save to Supabase
-      if (
-        rawAccountId &&
-        rawAccountId.startsWith("acct_") &&
-        isStripeConfigured() &&
-        (!seller || seller.stripe_account_id === rawAccountId)
-      ) {
-        try {
-          const stripe = getStripe();
-          const account = await stripe.accounts.retrieve(rawAccountId);
+    if (!isValidEmail(rawEmail)) {
+      return NextResponse.json(
+        { error: "Please provide a valid seller email address" },
+        { status: 400 }
+      );
+    }
+
+    const cleanEmail = rawEmail.toLowerCase();
+
+    // Only look up / refresh the account already bound to this email in Supabase.
+    // Never accept an arbitrary `account_id` from query params when no seller exists in DB.
+    let seller = await getSellerByEmail(cleanEmail, {
+      refreshFromStripe: true,
+    });
+
+    if (
+      seller &&
+      rawAccountId &&
+      isValidStripeAccountId(rawAccountId) &&
+      seller.stripe_account_id === rawAccountId &&
+      isStripeConfigured()
+    ) {
+      try {
+        const stripe = getStripe();
+        const account = await stripe.accounts.retrieve(seller.stripe_account_id);
+        const metaEmail = account.metadata?.seller_email?.trim().toLowerCase();
+        if (!metaEmail || metaEmail === cleanEmail) {
           const chargesEnabled = Boolean(account.charges_enabled);
           const payoutsEnabled = Boolean(account.payouts_enabled);
           const detailsSubmitted = Boolean(account.details_submitted);
@@ -72,62 +70,35 @@ export async function GET(request: NextRequest) {
             payouts_enabled: payoutsEnabled,
             details_submitted: detailsSubmitted,
           });
-        } catch (err) {
-          console.error("Error retrieving Stripe account on return:", err);
         }
+      } catch (err) {
+        console.error("Error retrieving Stripe account on return:", err);
       }
-
-      // Fetch listings belonging to this seller email
-      let sellerListings = [];
-      if (isSupabaseConfigured()) {
-        const db = getServerSupabaseClient();
-        const { data } = await db
-          .from("listings")
-          .select("*")
-          .ilike("seller_email", cleanEmail)
-          .order("created_at", { ascending: false });
-        sellerListings = data || [];
-      } else {
-        sellerListings = memoryStore
-          .getListings()
-          .filter((l) => l.seller_email.toLowerCase() === cleanEmail);
-      }
-
-      const enrichedListings = await enrichListingsWithStripeState(
-        sellerListings
-      );
-
-      return NextResponse.json({
-        seller,
-        listings: enrichedListings,
-      });
     }
 
-    // When no specific email is queried, return known sellers and distinct listing seller emails
-    const sellersMap = await getAllSellersMap();
-    const knownEmails = new Set<string>(sellersMap.keys());
-
+    // Fetch listings belonging to this seller email
+    let sellerListings = [];
     if (isSupabaseConfigured()) {
       const db = getServerSupabaseClient();
       const { data } = await db
         .from("listings")
-        .select("seller_email")
-        .order("created_at", { ascending: false })
-        .limit(50);
-      for (const row of data || []) {
-        if (row.seller_email) {
-          knownEmails.add(row.seller_email.trim().toLowerCase());
-        }
-      }
+        .select("*")
+        .ilike("seller_email", cleanEmail)
+        .order("created_at", { ascending: false });
+      sellerListings = data || [];
     } else {
-      for (const item of memoryStore.getListings()) {
-        knownEmails.add(item.seller_email.trim().toLowerCase());
-      }
+      sellerListings = memoryStore
+        .getListings()
+        .filter((l) => l.seller_email.toLowerCase() === cleanEmail);
     }
 
+    const enrichedListings = (
+      await enrichListingsWithStripeState(sellerListings)
+    ).map(({ seller_stripe_account_id: _omit, ...rest }) => rest);
+
     return NextResponse.json({
-      sellers: Array.from(sellersMap.values()),
-      suggestedEmails: Array.from(knownEmails),
+      seller,
+      listings: enrichedListings,
     });
   } catch (err) {
     console.error("Unexpected error in GET /api/stripe/connect:", err);
@@ -138,9 +109,20 @@ export async function GET(request: NextRequest) {
   }
 }
 
-// POST /api/stripe/connect - Create/reuse a Stripe Connect account for the seller and return a hosted onboarding URL
+// POST /api/stripe/connect - Create/resume a Stripe Connect account for the seller and return a hosted onboarding URL
 export async function POST(request: NextRequest) {
   try {
+    const rate = checkRateLimit(request, "stripe-connect", 15, 10 * 60 * 1000);
+    if (!rate.allowed) {
+      return NextResponse.json(
+        { error: "Too many onboarding attempts. Please try again shortly." },
+        {
+          status: 429,
+          headers: { "Retry-After": String(rate.retryAfterSeconds) },
+        }
+      );
+    }
+
     if (!isStripeConfigured()) {
       return NextResponse.json(
         { error: "Stripe secret key is not configured on the server" },
@@ -160,37 +142,57 @@ export async function POST(request: NextRequest) {
 
     const cleanEmail = rawEmail.trim().toLowerCase();
     const stripe = getStripe();
-    const origin = getOrigin(request);
+    const origin = getSafeSiteOrigin(request);
 
-    let existingSeller = await getSellerByEmail(cleanEmail);
+    let existingSeller = await getSellerByEmail(cleanEmail, {
+      refreshFromStripe: true,
+    });
     let stripeAccountId = existingSeller?.stripe_account_id || "";
 
-    // Verify existing account still exists in Stripe sandbox
+    // Prevent unauthenticated re-onboarding / bank detail modification once onboarding is complete
+    if (
+      existingSeller?.onboarding_complete &&
+      existingSeller?.charges_enabled
+    ) {
+      return NextResponse.json({
+        alreadyOnboarded: true,
+        stripe_account_id: existingSeller.stripe_account_id,
+        seller: existingSeller,
+      });
+    }
+
+    // Verify existing unfinished account still exists in Stripe sandbox
     if (stripeAccountId) {
       try {
-        await stripe.accounts.retrieve(stripeAccountId);
+        const account = await stripe.accounts.retrieve(stripeAccountId);
+        if (account.charges_enabled && account.details_submitted) {
+          existingSeller = await saveSellerAccount({
+            email: cleanEmail,
+            stripe_account_id: account.id,
+            onboarding_complete: true,
+            charges_enabled: true,
+            payouts_enabled: Boolean(account.payouts_enabled),
+            details_submitted: true,
+          });
+          return NextResponse.json({
+            alreadyOnboarded: true,
+            stripe_account_id: existingSeller.stripe_account_id,
+            seller: existingSeller,
+          });
+        }
       } catch {
         stripeAccountId = "";
       }
     }
 
-    // Create a new Stripe Connect account if the seller doesn't have one yet
+    // Create a new Stripe Connect Standard account (US) for Direct Charges
     if (!stripeAccountId) {
       const account = await stripe.accounts.create({
+        type: "standard",
         country: "US",
         email: cleanEmail,
-        controller: {
-          fees: { payer: "account" },
-          losses: { payments: "stripe" },
-          stripe_dashboard: { type: "express" },
-        },
-        capabilities: {
-          card_payments: { requested: true },
-          transfers: { requested: true },
-        },
         business_type: "individual",
         business_profile: {
-          url: "https://example.com",
           product_description: "Marketplace seller items",
         },
         metadata: {
